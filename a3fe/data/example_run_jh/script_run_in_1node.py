@@ -1416,6 +1416,55 @@ def patch_logging_into_local_execution_log():
     logger.info("Patched some logging into local_execution.log for clearer output")
 
 
+def patch_shorter_runtime_when_resuming():
+    """
+    This is useful for adaptive efficiency mode where we want to quickly
+    resume from existing simulations without long initial runtimes.
+    """
+    # Set up colored logger for this function
+    logger = logging.getLogger(__name__ + ".RUNTIME_PATCH")
+    logger.handlers.clear()  # Clear any existing handlers
+    logger.setLevel(logging.INFO)
+    logger.propagate = False  # Don't propagate to avoid duplicate messages
+    handler = logging.StreamHandler()
+    handler.setFormatter(ColorFormatter())
+    handler.addFilter(shared_filter)
+    logger.addHandler(handler)
+
+    # Store original method
+    original_run = Stage._run_without_threading
+
+    def patched_run(self, run_nos, adaptive=True, runtime=None, max_runtime=60):
+        """Patched version with shorter initial runtime"""
+        if adaptive and runtime is None:
+            has_existing_sims = False
+            try:
+                for win in self.lam_windows:
+                    for sim in win.sims:
+                        simfile_path = os.path.join(sim.output_dir, "simfile.dat")
+                        if os.path.exists(simfile_path) and os.path.getsize(simfile_path) > 0:
+                            has_existing_sims = True
+                            break
+                    if has_existing_sims:
+                        break
+            except Exception as e:
+                logger.warning(f"Could not check for existing simulations: {e}")
+                has_existing_sims = False
+            
+            if has_existing_sims:
+                runtime = 0.02  # Use shorter runtime for resumed calculations
+                logger.info(f"Resuming calculation detected - using shorter initial runtime: {runtime} ns")
+            else:
+                runtime = 0.2  # Use default runtime for fresh calculations
+                logger.info(f"Fresh calculation detected - using default initial runtime: {runtime} ns")
+
+        return original_run(self, run_nos, adaptive, runtime, max_runtime)
+
+    # Apply patch
+    Stage._run_without_threading = patched_run
+    logger.info("Stage._run_without_threading patched for shorter runtime when resuming")
+
+    
 # ==================================================
 # DEBUGGING HELPERS
 # ==================================================
