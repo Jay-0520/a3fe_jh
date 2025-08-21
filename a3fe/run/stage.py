@@ -89,7 +89,7 @@ class Stage(_SimulationRunner):
         output_dir: _Optional[str] = None,
         stream_log_level: int = _logging.INFO,
         update_paths: bool = True,
-        leg_type: _Optional[_LegType] = None,
+        leg_type: _Optional[str] = None,
     ) -> None:
         """
         Initialise an ensemble of SOMD simulations, constituting the Stage. If Stage.pkl exists in the
@@ -141,8 +141,7 @@ class Stage(_SimulationRunner):
         # Set the stage type first, as this is required for __str__,
         # and threrefore the super().__init__ call
         self.stage_type = stage_type.name.lower()
-        # TODO: data type here is very messy
-        self.leg_type = leg_type.name.lower() if leg_type is not None else 'unknown' 
+        self.leg_type = leg_type or 'unknown' 
 
         super().__init__(
             base_dir=base_dir,
