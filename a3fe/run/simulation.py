@@ -136,15 +136,15 @@ class Simulation(_SimulationRunner):
 
     def __str__(self) -> str:
         if self.leg_type is None:
-            self.leg_type = "unknown"
+            leg_type_str = "unknown"
         else:
-            self.leg_type = self.leg_type.name.lower()
+            leg_type_str = self.leg_type.name.lower()
         if self.stage_type is None:
-            self.stage_type = "unknown"
+            stage_type_str = "unknown"
         else:
-            self.stage_type = self.stage_type.name.lower()
+            stage_type_str = self.stage_type.name.lower()
 
-        return f"Simulation (leg={self.leg_type}, stage={self.stage_type}, lam={self.lam}, run_no={self.run_no})"
+        return f"Simulation (leg={leg_type_str}, stage={stage_type_str}, lam={self.lam}, run_no={self.run_no})"
 
     @property
     def running(self) -> bool:

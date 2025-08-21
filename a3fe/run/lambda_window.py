@@ -196,14 +196,14 @@ class LamWindow(_SimulationRunner):
 
     def __str__(self) -> str:
         if self.leg_type is None:
-            self.leg_type = "unknown"
+            leg_type_str = "unknown"
         else:
-            self.leg_type = self.leg_type.name.lower()
+            leg_type_str = self.leg_type.name.lower()
         if self.stage_type is None:
-            self.stage_type = "unknown"
+            stage_type_str = "unknown"
         else:
-            self.stage_type = self.stage_type.name.lower()
-        return f"LamWindow (leg={self.leg_type}, stage={self.stage_type}, lam={self.lam:.3f})"
+            stage_type_str = self.stage_type.name.lower()
+        return f"LamWindow (leg={leg_type_str}, stage={stage_type_str}, lam={self.lam:.3f})"
 
     @property
     def sims(self) -> _List[_Simulation]:

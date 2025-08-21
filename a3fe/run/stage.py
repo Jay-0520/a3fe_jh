@@ -199,16 +199,16 @@ class Stage(_SimulationRunner):
 
     def __str__(self) -> str:
         if self.leg_type is None:
-            self.leg_type = "unknown"
+            leg_type_str = "unknown"
         else:
-            self.leg_type = self.leg_type.name.lower()
-        
-        if self.stage_type is None:
-            self.stage_type = "unknown"
-        else:
-            self.stage_type = self.stage_type.name.lower()
+            leg_type_str = self.leg_type.name.lower()
 
-        return f"Stage (type={self.stage_type}, leg={self.leg_type})"
+        if self.stage_type is None:
+            stage_type_str = "unknown"
+        else:
+            stage_type_str = self.stage_type.name.lower()
+
+        return f"Stage (type={stage_type_str}, leg={leg_type_str})"
 
     @property
     def lam_windows(self) -> _List[_LamWindow]:
