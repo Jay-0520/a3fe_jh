@@ -20,6 +20,8 @@ from ..analyse.detect_equil import (
 from ._simulation_runner import SimulationRunner as _SimulationRunner
 from ._virtual_queue import VirtualQueue as _VirtualQueue
 from .simulation import Simulation as _Simulation
+from .enums import StageType as _StageType
+from .enums import LegType as _LegType
 
 
 class LamWindow(_SimulationRunner):
@@ -51,8 +53,8 @@ class LamWindow(_SimulationRunner):
         output_dir: _Optional[str] = None,
         stream_log_level: int = _logging.INFO,
         update_paths: bool = True,
-        stage_type: _Optional[str] = None,
-        leg_type: _Optional[str] = None, 
+        stage_type: _Optional[_StageType] = None,
+        leg_type: _Optional[_LegType] = None, 
     ) -> None:
         """
         Initialise a LamWindow object.
@@ -119,8 +121,8 @@ class LamWindow(_SimulationRunner):
 
         # Set stage_type and leg_type BEFORE calling super().__init__()
         # because __str__ is called during logging setup in super().__init__()
-        self.stage_type = stage_type or "unknown"  
-        self.leg_type = leg_type or "unknown"
+        self.stage_type = stage_type  
+        self.leg_type = leg_type
 
         super().__init__(
             base_dir=base_dir,
@@ -193,6 +195,14 @@ class LamWindow(_SimulationRunner):
             self._dump()
 
     def __str__(self) -> str:
+        if self.leg_type is None:
+            self.leg_type = "unknown"
+        else:
+            self.leg_type = self.leg_type.name.lower()
+        if self.stage_type is None:
+            self.stage_type = "unknown"
+        else:
+            self.stage_type = self.stage_type.name.lower()
         return f"LamWindow (leg={self.leg_type}, stage={self.stage_type}, lam={self.lam:.3f})"
 
     @property
