@@ -165,7 +165,7 @@ class Leg(_SimulationRunner):
 
 
     def __str__(self) -> str:
-        return f"Leg (type = {self.leg_type.name.lower()})"
+        return f"Leg (type={self.leg_type.name.lower()})"
 
     @property
     def stages(self) -> _List[_Stage]:
