@@ -113,7 +113,7 @@ class GradientData:
                 squared_sem = var / len(subsampled_grads)
                 # Store the results
                 gradients_wind.append(gradients)
-                means_intra.append(mean)
+                means_intra.append(mean) 
                 stat_ineffs_wind.append(stat_ineff)
                 gradients_subsampled_wind.append(subsampled_grads)
                 vars_intra.append(var)

@@ -136,7 +136,23 @@ calc.save()
     ╰──────────────────────────────────────────────────────────────────────────────╯
     ```
     this is simply because calling `antechamber -v` failed to produce right version info. we could install a different version
-    or simply set `version=23`.  
+    or simply set `version=23`.
+- when we get this error at runtime (see below), we should double check and downgrade `openff` package versions. First init your conda env, and then try this installation command `conda install -c conda-forge openff-toolkit=0.16.9 openff-interchange=0.4.3`. 
+    ```
+    │ /home/jjhuang/miniconda3/envs/a3fe_jh/lib/python3.12/site-packages/BioSimSpa │
+    │ ce/Sandpit/Exscientia/Parameters/_process.py:244 in getMolecule              │
+    │                                                                              │
+    │   241 │   │   │   │   │   "Parameterisation failed! Last error: '%s'" % str( │
+    │   242 │   │   │   │   )                                                      │
+    │   243 │   │   │   else:                                                      │
+    │ ❱ 244 │   │   │   │   raise _ParameterisationError(                          │
+    │   245 │   │   │   │   │   "Parameterisation failed! Last error: '%s'" % str( │
+    │   246 │   │   │   │   ) from None                                            │
+    │   247                                                                        │
+    ╰──────────────────────────────────────────────────────────────────────────────╯
+    ParameterisationError: Parameterisation failed! Last error: 'Unable to create 
+    OpenFF Interchange object!'
+    ```    
 ### Running a3fe in one node
 - It is recommended to use script `a3fe_jh/a3fe/data/example_run_jh/script_run_in_1node.py` to run a3fe calculation in one node
   - for running in adaptive mode, make sure to remove this step `calc.set_equilibration_time()`
