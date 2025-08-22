@@ -18,6 +18,7 @@ class A3feSlurmParameters(BaseModel):
     account: str = Field(default="def-mkoz", description="SLURM account")
     job_name: str = Field(default="a3fe_job", description="Job name")
     cpus_per_task: int = Field(default=1, ge=1, description="CPUs per task")
+    gpus_per_node: int = Field(default=1, ge=0, description="GPUs per node")
     gres: str = Field(default="", description="Generic resources (GPUs), e.g. 'gpu:v100:1'")
     time: str = Field(default="00:30:00", description="Wall time limit")
     mem: str = Field(default="4G", description="Memory requirement")
@@ -29,9 +30,10 @@ class A3feSlurmParameters(BaseModel):
     # Module system
     purge_modules: bool = Field(default=True, description="Whether to purge modules first")
     modules_to_load: list[str] = Field(
-        default=["StdEnv/2020", "gcc/9.3.0", "cuda/11.8.0", "openmpi/4.0.3", "gromacs/2023"],
+        default=["StdEnv/2023", "gcc/12.3", "openmpi/4.1.5", "cuda/12.2", "gromacs/2024.4"],
         description="Modules to load"
     )
+    work_dir: Optional[str] = Field(default=None, description="Working directory to cd into")
     
     # Conda environment
     conda_init_script: str = Field(
@@ -43,6 +45,9 @@ class A3feSlurmParameters(BaseModel):
     # Environment variables
     setup_cuda_env: bool = Field(default=True, description="Whether to set up CUDA environment")
     somd_platform: str = Field(default="CUDA", description="SOMD platform (CUDA or CPU)")
+
+    # Python script to run (for custom format)
+    python_script: str = Field(default="run_calc.py", description="Python script to execute")
 
     # pre/post command sequences
     pre_commands: list[str] = Field(
@@ -173,6 +178,52 @@ class A3feSlurmGenerator:
             params=params,
         )
     
+    def generate_custom_script(
+        self,
+        job_name: str,
+        work_dir: str,
+        python_script: str = "run_calc.py",
+        custom_overrides: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """
+        Generate custom SLURM script in your desired format.
+        
+        Parameters
+        ----------
+        job_name : str
+            Name of the job
+        work_dir : str
+            Working directory path
+        python_script : str
+            Python script to execute
+        custom_overrides : dict, optional
+            Custom parameter overrides
+            
+        Returns
+        -------
+        str
+            SLURM script content
+        """
+        # Create a copy of base parameters
+        params = self.base_params.copy(deep=True)
+        
+        # Set job-specific parameters
+        params.job_name = job_name
+        params.work_dir = work_dir
+        params.python_script = python_script
+        params.output_file = f"{job_name}-%A.%a.out"
+        params.error_file = f"{job_name}-%A.%a.err"
+        
+        # Apply custom overrides
+        if custom_overrides:
+            for key, value in custom_overrides.items():
+                if hasattr(params, key):
+                    setattr(params, key, value)
+                else:
+                    params.custom_directives[key] = value
+        
+        return self._format_custom_script(params)
+    
     def _format_prep_script(
         self,
         params: A3feSlurmParameters,
@@ -269,7 +320,6 @@ class A3feSlurmGenerator:
         
         return "\n".join(lines) + "\n"
     
-    # TODO: consolidate this with _format_prep_script()
     def _format_somd_script(
         self,
         params: A3feSlurmParameters,
@@ -367,6 +417,96 @@ class A3feSlurmGenerator:
         
         return "\n".join(lines) + "\n"
     
+    def _format_custom_script(self, params: A3feSlurmParameters) -> str:
+        """Format parameters into custom script content matching your desired format."""
+        lines = [
+            "#!/bin/bash",
+            f"#SBATCH --job-name={params.job_name}",
+            f"#SBATCH --account={params.account}",
+        ]
+        
+        # Add GPU directive if specified
+        if params.gpus_per_node > 0:
+            lines.append(f"#SBATCH --gpus-per-node={params.gpus_per_node}")
+        
+        lines.extend([
+            f"#SBATCH --cpus-per-task={params.cpus_per_task}",
+            f"#SBATCH --time={params.time}",
+            f"#SBATCH --error={params.error_file}",
+            f"#SBATCH --output={params.output_file}",
+            f"#SBATCH --mem={params.mem}",
+        ])
+        
+        # Add custom SLURM directives
+        for key, value in params.custom_directives.items():
+            if value:  # Only add if value is not empty
+                lines.append(f"#SBATCH --{key}={value}")
+            else:  # For flags without values
+                lines.append(f"#SBATCH --{key}")
+        
+        lines.append("")
+        
+        # Module loading
+        lines.append("# load modules")
+        if params.purge_modules:
+            lines.append("module --force purge")
+        
+        if params.modules_to_load:
+            for module in params.modules_to_load:
+                lines.append(f"module load {module}")
+        
+        lines.append("")
+        
+        # Change to working directory
+        if params.work_dir:
+            lines.extend([
+                f"cd {params.work_dir}",
+                ""
+            ])
+        
+        # Conda setup
+        lines.extend([
+            "# initialize and activate conda",
+            f". {params.conda_init_script}",
+            f"conda activate {params.conda_env}",
+            "",
+            'export PATH="$CONDA_PREFIX/bin:$PATH"',
+            "hash -r",
+            "",
+        ])
+        
+        # Environment setup
+        if params.setup_cuda_env:
+            lines.extend([
+                "unset LD_LIBRARY_PATH",
+                'export LD_LIBRARY_PATH="$CUDA_HOME/lib64"',
+                "",
+            ])
+        
+        # Pre-commands
+        if params.pre_commands:
+            lines.extend([
+                "# Pre-execution commands",
+                *params.pre_commands,
+                "",
+            ])
+        
+        # Main command
+        lines.extend([
+            f"python {params.python_script}",
+            ""
+        ])
+        
+        # Post-commands
+        if params.post_commands:
+            lines.extend([
+                "# Post-execution commands",
+                *params.post_commands,
+                "",
+            ])
+        
+        return "\n".join(lines)
+    
     def write_script(
         self,
         output_path: Union[str, Path],
@@ -392,7 +532,28 @@ def create_default_a3fe_generator() -> A3feSlurmGenerator:
     return A3feSlurmGenerator()
 
 
+
+def create_default_a3fe_generator() -> A3feSlurmGenerator:
+    """Create A3FE SLURM generator with default parameters."""
+    return A3feSlurmGenerator()
+
+
 def create_custom_a3fe_generator(**kwargs) -> A3feSlurmGenerator:
     """Create A3FE SLURM generator with custom parameters."""
     params = A3feSlurmParameters(**kwargs)
     return A3feSlurmGenerator(params)
+
+
+def create_custom_a3fe_generator_drac(**kwargs) -> A3feSlurmGenerator:
+    """Create A3FE SLURM generator with parameters for DRAC clusters, such as nibi, graham, cedar or killarney"""
+    default_params = A3feSlurmParameters(
+        account="aip-mkoz",
+        cpus_per_task=16,
+        gpus_per_node=1,
+        time="24:00:00",
+        mem="8G",
+        modules_to_load=["StdEnv/2023", "gcc/12.3", "openmpi/4.1.5", "cuda/12.2", "gromacs/2024.4"],
+        conda_env="a3fe_jh",
+        **kwargs
+    )
+    return A3feSlurmGenerator(default_params)

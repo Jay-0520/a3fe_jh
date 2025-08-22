@@ -8,59 +8,78 @@ from .slurm_script_generator import A3feSlurmParameters
 
 
 # Default SLURM configurations for different preparation steps
+# Default SLURM configurations for different preparation steps
 DEFAULT_PREP_STEP_CONFIGS = {
     "parameterise": A3feSlurmParameters(
         job_name="param",
-        cpus_per_task=1,
-        gres="",  # CPU-only for parameterization
+        account="def-mkoz",
+        cpus_per_task=16,
+        gpus_per_node=0,  # CPU-only for parameterization
+        gres="",  # Empty gres for CPU-only
         time="00:30:00",
-        mem="2G",
-        modules_to_load=["StdEnv/2020", "gcc/9.3.0", "openmpi/4.0.3", "gromacs/2023"],
+        mem="8G",
+        modules_to_load=["StdEnv/2023", "gcc/12.3", "openmpi/4.1.5", "gromacs/2024.4"],
+        conda_env="a3fe_jh",
         setup_cuda_env=False
     ),
     "solvate": A3feSlurmParameters(
         job_name="solvate",
-        cpus_per_task=1,
-        gres="",  # CPU-only for solvation
+        account="def-mkoz",
+        cpus_per_task=16,
+        gpus_per_node=0,  # CPU-only for solvation
+        gres="",  # Empty gres for CPU-only
         time="00:30:00", 
-        mem="2G",
-        modules_to_load=["StdEnv/2020", "gcc/9.3.0", "openmpi/4.0.3", "gromacs/2023"],
+        mem="8G",
+        modules_to_load=["StdEnv/2023", "gcc/12.3", "openmpi/4.1.5", "gromacs/2024.4"],
+        conda_env="a3fe_jh",
         setup_cuda_env=False
     ),
     "minimise": A3feSlurmParameters(
         job_name="minimise",
-        cpus_per_task=2,
-        gres="",  # CPU-only for GROMACS minimization
-        time="00:60:00",
-        mem="2G", 
-        modules_to_load=["StdEnv/2020", "gcc/9.3.0", "cuda/11.8.0", "openmpi/4.0.3", "gromacs/2023"],
+        account="def-mkoz",
+        cpus_per_task=16,
+        gpus_per_node=1,  # GPU for GROMACS minimization
+        gres="", 
+        time="01:00:00",
+        mem="8G", 
+        modules_to_load=["StdEnv/2023", "gcc/12.3", "openmpi/4.1.5", "cuda/12.2", "gromacs/2024.4"],
+        conda_env="a3fe_jh",
         setup_cuda_env=True
     ),
     "heat_preequil": A3feSlurmParameters(
         job_name="heat_preequil",
-        cpus_per_task=4,
-        gres="gpu:v100:1",  # GPU for GROMACS heating/equilibration
+        account="def-mkoz",
+        cpus_per_task=16,
+        gpus_per_node=1,  # GPU for GROMACS heating/equilibration
+        gres="",
         time="03:00:00",
-        mem="2G",
-        modules_to_load=["StdEnv/2020", "gcc/9.3.0", "cuda/11.8.0", "openmpi/4.0.3", "gromacs/2023"],
+        mem="8G",
+        modules_to_load=["StdEnv/2023", "gcc/12.3", "openmpi/4.1.5", "cuda/12.2", "gromacs/2024.4"],
+        conda_env="a3fe_jh",
         setup_cuda_env=True
     ),
     "ensemble_equil": A3feSlurmParameters(
         job_name="ensemble_equil",
-        cpus_per_task=4,
-        gres="gpu:v100:1",  # GPU for SOMD ensemble equilibration
+        account="def-mkoz",
+        cpus_per_task=16,
+        gpus_per_node=1,  # GPU for SOMD ensemble equilibration
+        gres="", 
         time="12:00:00",
-        mem="2G",
-        modules_to_load=["StdEnv/2020", "gcc/9.3.0", "cuda/11.8.0", "openmpi/4.0.3", "gromacs/2023"],
+        mem="8G",
+        modules_to_load=["StdEnv/2023", "gcc/12.3", "openmpi/4.1.5", "cuda/12.2", "gromacs/2024.4"],
+        conda_env="a3fe_jh",
         setup_cuda_env=True
     ),
     "somd_production": A3feSlurmParameters(
         job_name="run_somd",
-        cpus_per_task=4,
-        gres="gpu:v100:1",  # GPU for SOMD production runs
+        account="def-mkoz",
+        cpus_per_task=16,
+        gpus_per_node=1,  # GPU for SOMD production runs
+        gres="", 
         time="24:00:00", 
-        mem="4G",
-        modules_to_load=["StdEnv/2020", "gcc/9.3.0", "cuda/11.8.0", "openmpi/4.0.3", "gromacs/2023"],
+        mem="8G",
+        modules_to_load=["StdEnv/2023", "gcc/12.3", "openmpi/4.1.5", "cuda/12.2", "gromacs/2024.4"],
+        conda_env="a3fe_jh",
         setup_cuda_env=True
     )
 }
@@ -171,7 +190,10 @@ class SimulationSlurmConfigs:
         account: str,
         modules: list = None,
         conda_env: str = None,
-        base_gres: str = "gpu:v100:1"
+        base_gres: str = "gpu:v100:1",
+        base_gpus_per_node: int = 1,
+        base_cpus_per_task: int = 16,
+        base_mem: str = "8G"
     ) -> None:
         """
         Apply site-specific settings to all configurations.
@@ -185,9 +207,19 @@ class SimulationSlurmConfigs:
         conda_env : str, optional
             Conda environment name
         base_gres : str, optional
-            Default GPU specification for GPU steps
+            Default GPU specification for GPU steps (backward compatibility)
+        base_gpus_per_node : int, optional
+            Default GPUs per node for GPU steps
+        base_cpus_per_task : int, optional
+            Default CPUs per task
+        base_mem : str, optional
+            Default memory requirement
         """
-        updates = {"account": account}
+        updates = {
+            "account": account,
+            "cpus_per_task": base_cpus_per_task,
+            "mem": base_mem
+        }
         
         if modules:
             updates["modules_to_load"] = modules
@@ -199,8 +231,13 @@ class SimulationSlurmConfigs:
             self.update_config(step_type, **updates)
             
             # Update GPU specifications for GPU steps, but preserve CPU-only steps
-            if self._configs[step_type].gres.strip():  # Only if step uses GPU
-                self.update_config(step_type, gres=base_gres)
+            current_config = self._configs[step_type]
+            if current_config.gpus_per_node > 0:  # This is a GPU step
+                self.update_config(
+                    step_type, 
+                    gres=base_gres,
+                    gpus_per_node=base_gpus_per_node
+                )
 
 
 # Global instance for easy access (can be customized)
@@ -243,19 +280,27 @@ def setup_compute_canada_configs(account: str, cluster: str = "cedar") -> None:
     cluster_configs = {
         "cedar": {
             "modules": ["StdEnv/2020", "gcc/9.3.0", "cuda/11.4", "openmpi/4.0.3", "gromacs/2021.3"],
-            "base_gres": "gpu:v100l:1"
+            "base_gres": "gpu:v100l:1",
+            "base_gpus_per_node": 1,
+            "conda_env": "a3fe_gra"
         },
         "graham": {
             "modules": ["StdEnv/2020", "gcc/9.3.0", "cuda/11.4", "openmpi/4.0.3", "gromacs/2021.3"],
-            "base_gres": "gpu:t4:1"
+            "base_gres": "gpu:t4:1",
+            "base_gpus_per_node": 1,
+            "conda_env": "a3fe_gra"
         },
         "beluga": {
             "modules": ["StdEnv/2020", "gcc/9.3.0", "cuda/11.4", "openmpi/4.0.3", "gromacs/2021.3"],
-            "base_gres": "gpu:v100:1"
+            "base_gres": "gpu:v100:1",
+            "base_gpus_per_node": 1,
+            "conda_env": "a3fe_gra"
         },
-        "narval": {
+        "nibi": {
             "modules": ["StdEnv/2023", "gcc/12.3", "cuda/12.2", "openmpi/4.1.5", "gromacs/2024"],
-            "base_gres": "gpu:a100:1"
+            "base_gres": "gpu:a100:1",
+            "base_gpus_per_node": 1,
+            "conda_env": "a3fe_jh"
         }
     }
     
@@ -266,5 +311,7 @@ def setup_compute_canada_configs(account: str, cluster: str = "cedar") -> None:
     setup_site_configs(
         account=account,
         modules=config["modules"],
-        base_gres=config["base_gres"]
+        base_gres=config["base_gres"],
+        base_gpus_per_node=config["base_gpus_per_node"],
+        conda_env=config["conda_env"]
     )

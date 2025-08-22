@@ -77,7 +77,7 @@ class DedupStatusFilter(logging.Filter):
     JOBID_RE = re.compile(r"slurm_job_id=\s*(\d+)")
     STATUS_RE = re.compile(r"status\s*=\s*(JobStatus\.\w+)")
     SIM_DETAILS_RE = re.compile(
-        r"Simulation \(stage=([^,]+), lam=([^,]+), run_no=([^)]+)\)"
+        r"Simulation \(leg=([^,]+), stage=([^,]+), lam=([^,]+), run_no=([^)]+)\)"
     )
 
     def __init__(self, debug_mode: bool = False):
@@ -170,13 +170,14 @@ class DedupStatusFilter(logging.Filter):
         if not sim_details_m:
             sim_details_m = self.SIM_DETAILS_RE.search(logger_name)
         if sim_details_m:
-            stage = sim_details_m.group(1)
-            lam = sim_details_m.group(2)
-            run_no = sim_details_m.group(3)
+            leg = sim_details_m.group(1)
+            stage = sim_details_m.group(2) 
+            lam = sim_details_m.group(3)
+            run_no = sim_details_m.group(4)
             if jobid:
-                return f"{jobid}:{stage}:{lam}:{run_no}"
+                return f"{jobid}:sim:{leg}:{stage}:{lam}:{run_no}"
             else:
-                return f"current:{stage}:{lam}:{run_no}"
+                return f"sim:{leg}:{stage}:{lam}:{run_no}"
         else:
             if jobid:
                 return f"{jobid}:{logger_name}"
@@ -1641,12 +1642,13 @@ def _debug_patch_force_not_equilibrated():
 
 
 if __name__ == "__main__":
+    from a3fe.run.enums import LegType as _LegType
     # Set up global logging first
     setup_global_logging()
 
     # Configure via environment variables
     FORCE_LOCAL_EXECUTION = True
-    FORCE_CPU_PLATFORM = False
+    FORCE_CPU_PLATFORM = True
     # SKIP_ADAPTIVE_EFFICIENCY = True  # skip the adaptive efficiency optimization loop
 
     patch_virtual_queue_for_local_execution()
@@ -1655,26 +1657,28 @@ if __name__ == "__main__":
     # _debug_patch_stage_skip_adaptive_efficiency()
     # _debug_patch_force_not_equilibrated()
     # fix_simulation_times(calc)
-
+    a3.Calculation.required_legs = [_LegType.BOUND]
     sysprep_cfg = SystemPreparationConfig(slurm=True)  # use default settings
 
     calc = a3.Calculation(
-        base_dir="/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_again7",
-        input_dir="/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_again7/input",
+        base_dir="/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_test_setup",
+        input_dir="/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_test_setup/input",
+        ensemble_size=3,
     )
 
     calc.setup(
         bound_leg_sysprep_config=sysprep_cfg,
         free_leg_sysprep_config=sysprep_cfg,
+        # skip_preparation=True,
     )
 
     add_filter_recursively(calc)
 
     calc.get_optimal_lam_vals(delta_er=0.5)
-    calc.run(adaptive=True, parallel=True)
+    # calc.run(adaptive=True, parallel=True)
 
-    calc.analyse()
-    calc.save()
+    # calc.analyse()
+    # calc.save()
 
 
 
