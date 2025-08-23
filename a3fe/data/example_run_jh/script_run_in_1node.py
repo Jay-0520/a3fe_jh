@@ -1166,9 +1166,9 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
 
             return 666666  # Return success to continue execution
 
-    def _submit_mbar_parallel(script_path, cwd) -> int:
+    def _submit_mbar_parallel(script_path, cwd, leg_type=None, stage_type=None) -> int:
         """Submit MBAR job to global manager for parallel execution."""
-        return _GLOBAL_MBAR_MANAGER.submit_mbar_job(script_path, cwd)
+        return _GLOBAL_MBAR_MANAGER.submit_mbar_job(script_path, cwd, leg_type, stage_type)
 
     def timing_based_get_tot_gpu_time(self) -> float:
         """need to get tot_gpu_time to set relative_simulation_cost which is
