@@ -1353,53 +1353,86 @@ def patch_logging_into_local_execution_log():
     logger.info("Patched some logging into local_execution.log for clearer output")
 
 
-def patch_shorter_runtime_when_resuming():
+def patch_shorter_runtime_when_resuming(new_runtime=0.05):
     """
-    This is useful for adaptive efficiency mode where we want to quickly
-    resume from existing simulations without long initial runtimes.
-    """
-    # Set up colored logger for this function
+    Directly patch the hardcoded runtime=0.2 to runtime=0.05 in Stage._run_without_threading
+    """    
     logger = logging.getLogger(__name__ + ".RUNTIME_PATCH")
-    logger.handlers.clear()  # Clear any existing handlers
-    logger.setLevel(logging.INFO)
-    logger.propagate = False  # Don't propagate to avoid duplicate messages
+    logger.handlers.clear()
+    logger.setLevel(logging.INFO) 
+    logger.propagate = False
     handler = logging.StreamHandler()
     handler.setFormatter(ColorFormatter())
     handler.addFilter(shared_filter)
     logger.addHandler(handler)
+    
+    def patched_run_without_threading(
+        self,
+        run_nos,
+        adaptive=True,
+        runtime=None,
+        max_runtime=60,
+    ):
+        """Patched version with runtime=0.05 instead of 0.2"""
+        try:
+            # Reset self.kill_thread so we can restart after killing
+            self.kill_thread = False
 
-    # Store original method
-    original_run = Stage._run_without_threading
+            if not adaptive and runtime is None:
+                raise ValueError(
+                    "If adaptive equilibration detection is disabled, a runtime must be supplied."
+                )
+            if adaptive and runtime is not None:
+                raise ValueError(
+                    "If adaptive equilibration detection is enabled, a runtime cannot be supplied."
+                )
 
-    def patched_run(self, run_nos, adaptive=True, runtime=None, max_runtime=60):
-        """Patched version with shorter initial runtime"""
-        if adaptive and runtime is None:
-            has_existing_sims = False
-            try:
-                for win in self.lam_windows:
-                    for sim in win.sims:
-                        simfile_path = os.path.join(sim.output_dir, "simfile.dat")
-                        if os.path.exists(simfile_path) and os.path.getsize(simfile_path) > 0:
-                            has_existing_sims = True
-                            break
-                    if has_existing_sims:
-                        break
-            except Exception as e:
-                logger.warning(f"Could not check for existing simulations: {e}")
-                has_existing_sims = False
-            
-            if has_existing_sims:
-                runtime = 0.02  # Use shorter runtime for resumed calculations
-                logger.info(f"Resuming calculation detected - using shorter initial runtime: {runtime} ns")
+            if not adaptive:
+                self._logger.info(
+                    f"Starting {self}. Adaptive equilibration = {adaptive}..."
+                )
+            elif adaptive:
+                self._logger.info(
+                    f"Starting {self}. Adaptive equilibration = {adaptive}..."
+                )
+                if runtime is None:
+                    runtime = new_runtime  # This is the only change: 0.2 → new_runtime
+
+            # Run initial SOMD simulations
+            for win in self.lam_windows:
+                win.run(run_nos=run_nos, runtime=runtime)
+                win._update_log()
+                self._dump()
+
+            # Periodically check the simulations and analyse/ resubmit as necessary
+            # Copy to ensure that we don't modify self.lam_windows when updating self.running_wins
+            self.running_wins = self.lam_windows.copy()
+            self._dump()
+
+            # Run the appropriate run loop
+            if adaptive:
+                # Allocate simulation time to achieve maximum efficiency
+                self._run_loop_adaptive_efficiency(
+                    run_nos=run_nos, max_runtime=max_runtime
+                )
+                # Check that equilibration has been achieved and resubmit if required
+                self._run_loop_adaptive_equilibration_multiwindow(
+                    run_nos=run_nos, max_runtime=max_runtime
+                )
             else:
-                runtime = 0.2  # Use default runtime for fresh calculations
-                logger.info(f"Fresh calculation detected - using default initial runtime: {runtime} ns")
+                self._run_loop_non_adaptive()
 
-        return original_run(self, run_nos, adaptive, runtime, max_runtime)
+            # All simulations are now finished, so perform final analysis
+            self._logger.info(f"All simulations in {self} have finished.")
 
-    # Apply patch
-    Stage._run_without_threading = patched_run
-    logger.info("Stage._run_without_threading patched for shorter runtime when resuming")
+        except Exception as e:
+            self._logger.exception("")
+            raise e
+    
+    # Replace the method
+    Stage._run_without_threading = patched_run_without_threading
+    
+    logger.info(f"Stage._run_without_threading patched: runtime 0.2 → {new_runtime}")
 
     
 # ==================================================
@@ -1609,6 +1642,7 @@ if __name__ == "__main__":
     )
 
     add_filter_recursively(calc)
+    # patch_shorter_runtime_when_resuming(0.05)
 
     calc.get_optimal_lam_vals(delta_er=0.5)
     # calc.run(adaptive=True, parallel=True)
