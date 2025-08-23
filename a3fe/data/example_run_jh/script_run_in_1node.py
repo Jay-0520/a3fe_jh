@@ -1425,9 +1425,11 @@ def patch_logging_into_local_execution_log():
     logger.info("Patched some logging into local_execution.log for clearer output")
 
 
-def patch_shorter_runtime_when_resuming(new_runtime=0.05):
+def patch_shorter_runtime_when_resuming(new_runtime=0.1):
     """
-    Directly patch the hardcoded runtime=0.2 to runtime=0.05 in Stage._run_without_threading
+    Directly patch the hardcoded runtime=0.2 to runtime=0.1 in Stage._run_without_threading
+
+    0.1 ns is the minimum allowed runtime for SOMD simulations
     """    
     logger = logging.getLogger(__name__ + ".RUNTIME_PATCH")
     logger.handlers.clear()
