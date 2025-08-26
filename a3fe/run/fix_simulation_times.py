@@ -70,6 +70,7 @@ def _get_actual_simtime_from_file(sim, timestep_ns=4e-6, detect_gaps=True):
     sim._logger.info(f"  Total steps: {len(steps)}")
     sim._logger.info(f"  Median interval: {median_interval}")
     sim._logger.info(f"  Large gaps found: {len(large_gaps)}")
+    sim._logger.info(f"  Using first contiguous block: steps {steps[start_idx]} to {steps[end_idx]} ({block_size} entries)")
     
     # Return time based on largest contiguous block
     return steps[end_idx] * timestep_ns
