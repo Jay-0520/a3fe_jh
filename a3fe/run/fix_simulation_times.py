@@ -1,13 +1,47 @@
 import os
-import numpy as np
 import subprocess
-from pathlib import Path
+
+def _get_actual_simtime_from_file(sim, timestep_ns=4e-6):
+    """
+    Robustly determine the actual simulation time from simfile.dat
+    by scanning to the last valid data line.
+    
+    Parameters
+    ----------
+    sim : a3fe.Simulation
+        Simulation object
+    timestep_ns : float
+        Simulation timestep in ns (default 4 fs = 4e-6 ns)
+    
+    Returns
+    -------
+    float
+        Actual usable simulation time in ns
+    """
+    simfile_path = os.path.join(sim.output_dir, "simfile.dat")
+    if not os.path.exists(simfile_path) or os.stat(simfile_path).st_size == 0:
+        return 0.0
+
+    last_step = None
+    with open(simfile_path, "r") as f:
+        for line in f:
+            if line.startswith("#") or not line.strip():
+                continue
+            try:
+                step = int(line.split()[0])
+                last_step = step
+            except ValueError:
+                continue
+
+    if last_step is None:
+        return 0.0
+    return last_step * timestep_ns
 
 
 def truncate_simulations_to_minimum(calc):
     """
-    Truncate all simulations to the minimum runtime for each lambda window.
-    This ensures all repeats have the same simulation length for proper MBAR analysis.
+    Truncate all simulations to the minimum runtime for each lambda window,
+    using robust parsing of simfile.dat instead of get_tot_simtime().
     
     Parameters
     ----------
@@ -25,27 +59,24 @@ def truncate_simulations_to_minimum(calc):
             stage_has_issues = False
             
             for lam_window in stage.lam_windows:
-                # Get simulation times for all runs
+                # Get simulation times for all runs (robust)
                 sim_times = []
                 for sim in lam_window.sims:
-                    sim_time = sim.get_tot_simtime()
+                    sim_time = _get_actual_simtime_from_file(sim, timestep_ns=sim.timestep)
                     sim_times.append(sim_time)
                 
-                # Check if all times are consistent (within 0.01 ns tolerance)
                 min_time = min(sim_times)
                 max_time = max(sim_times)
                 
-                if abs(max_time - min_time) > 0.01:  # More than 0.01 ns difference
+                if abs(max_time - min_time) > 0.01:
                     stage_has_issues = True
                     logger.warning(f"Lambda {lam_window.lam:.3f}: Inconsistent times {sim_times}")
                     logger.warning(f"  -> Truncating to minimum: {min_time:.6f} ns")
                     
-                    # Truncate each simulation to the minimum time
                     for i, sim in enumerate(lam_window.sims):
                         if sim_times[i] > min_time:
                             truncate_simulation_file(sim, min_time, logger)
                             logger.info(f"     Truncated run {sim.run_no}: {sim_times[i]:.6f} -> {min_time:.6f} ns")
-                    
                 else:
                     logger.debug(f"Lambda {lam_window.lam:.3f}: ✓ All runs consistent at {min_time:.6f} ns")
             
