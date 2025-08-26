@@ -254,7 +254,7 @@ def verify_truncation(calc):
     return all_consistent
 
 
-def fix_simulation_times(calc, apply_truncation=True):
+def fix_simulation_times(calc, apply_truncation=True, detect_gaps=True):
     """
     Complete workflow to fix inconsistent simulation times.
     
@@ -266,7 +266,7 @@ def fix_simulation_times(calc, apply_truncation=True):
     logger = calc._logger
     if apply_truncation:
         logger.info("Starting simulation time truncation process...")
-        truncate_simulations_to_minimum(calc)
+        truncate_simulations_to_minimum(calc, detect_gaps=detect_gaps)
 
     success = verify_truncation(calc)
     
