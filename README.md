@@ -115,7 +115,8 @@ calc.analyse()
 calc.save()
 ```
 
-### Some notes for solving runtime errors
+### Some notes for solving runtime errors 
+ (more runtime errors can be found in this [README.md](https://github.com/Jay-0520/a3fe_jh/blob/main/a3fe/data/example_run_jh/README.md))
 - if `ensemble_equilibration_*` runs faild, we can simply remove the entire folder and re-run the calculation
 - reloading molecules via `_BSS.IO.readMolecules()` leads to different molecule number (MolNum). This may cause issues when we resume a previously-stopped run
   - as a result, when using `skip_preparation=True` in Leg.setup(), we have to ensure that restraints are generated in the same run as  pre-equilibrated system is loaded. In other words, `restraints.pkl` and `Leg.pkl` must be created in the same run
@@ -154,17 +155,31 @@ calc.save()
     OpenFF Interchange object!'
     ```    
 ### Running a3fe in one node
-- It is recommended to use script `a3fe_jh/a3fe/data/example_run_jh/script_run_in_1node.py` to run a3fe calculation in one node
+- It is recommended to use script `a3fe_jh/a3fe/data/example_run_jh/script_run_in_1node.py` to run a3fe calculation in one node, especially in a HPC environment, since queueing can be very slow. 
   - for running in adaptive mode, make sure to remove this step `calc.set_equilibration_time()`
-- we often need to resume calculation due to the sampling challenge of FEP. we can use this tool `a3fe.run.fix_simulation_times.py` to check simulations runs that were interrupted. we must ensure all runs for a given lambda have completed the same amount of runtime
-  ```
-  from a3fe.run.fix_simulation_times import fix_simulation_times
 
-  # sometimes we might need to run this twice because this code first fixes gaps in the data and then fixs runtime inconsistency
-  for num in range(1, 3):
-     print(f"Run fix simulation times - {num} run...")
-     fix_simulation_times(calc)  
-  ```
+### How to resume previously-killed run? 
+- we often need to resume calculation to extend simulations due to the sampling challenge of FEP. we can use this tool `a3fe.run.fix_simulation_times.py` to check simulations runs that were interrupted. we must ensure all runs for a given lambda have completed the same amount of runtime.
+  - first of all, use `fix_simulation_times()` to fix runtime:
+    ``` 
+    from a3fe.run.fix_simulation_times import fix_simulation_times
+
+    # sometimes we might need to run this twice because this code first fixes gaps in the data and then fixs runtime inconsistency
+    for num in range(1, 3):
+        print(f"Run fix simulation times - {num} run...")
+        fix_simulation_times(calc)  
+    ```
+  - secondly, we can apply `patch_shorter_runtime_when_resuming(new_runtime=0)` from `script_run_in_1node.py` avoid running additional simulations for lambdaw windows that were already completed:
+    ```
+        calc = a3.Calculation(base_dir="previous_one", input_dir="previous_one")
+        patch_shorter_runtime_when_resuming(0)  # this patch can be useful to speed up the process
+        calc.run(adaptive=True,
+                parallel=True)
+        calc.wait()
+        calc.analyse()
+        calc.save()
+    ```
+
  
 
 ### Copyright
