@@ -173,9 +173,7 @@ def truncate_simulations_to_minimum(calc, detect_gaps=True):
                     )
 
             if not stage_has_issues:
-                logger.info(f" ✅ Leg {leg.leg_type.name} Stage {stage.stage_type.name} has no timing issues")
-
-    logger.info("=== TRUNCATION COMPLETE ===")
+                logger.info(f" - Leg {leg.leg_type.name} Stage {stage.stage_type.name} has no timing issues")
 
 
 def truncate_simulation_file(simulation, target_time_ns, logger, detect_gaps=True):
