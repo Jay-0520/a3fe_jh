@@ -450,8 +450,11 @@ class Stage(_SimulationRunner):
         """
 
         while not self._maximally_efficient:
+            stage_total_simtime = sum(
+                [win.get_tot_simtime(run_nos=run_nos) for win in self.lam_windows]
+            )
             self._logger.info(
-                "Maximum efficiency for given runtime constant not achieved."
+                f"Current total runtime -> {stage_total_simtime}; maximum efficiency for given runtime constant not achieved."
                 " Allocating simulation time to achieve maximum efficiency..."
             )
 
