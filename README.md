@@ -156,6 +156,15 @@ calc.save()
 ### Running a3fe in one node
 - It is recommended to use script `a3fe_jh/a3fe/data/example_run_jh/script_run_in_1node.py` to run a3fe calculation in one node
   - for running in adaptive mode, make sure to remove this step `calc.set_equilibration_time()`
+- we often need to resume calculation due to the sampling challenge of FEP. we can use this tool `a3fe.run.fix_simulation_times.py` to check simulations runs that were interrupted. we must ensure all runs for a given lambda have completed the same amount of runtime
+  ```
+  from a3fe.run.fix_simulation_times import fix_simulation_times
+
+  # sometimes we might need to run this twice because this code first fixes gaps in the data and then fixs runtime inconsistency
+  for num in range(1, 3):
+     print(f"Run fix simulation times - {num} run...")
+     fix_simulation_times(calc)  
+  ```
  
 
 ### Copyright

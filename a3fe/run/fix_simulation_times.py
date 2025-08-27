@@ -112,13 +112,9 @@ def truncate_simulations_to_minimum(calc, detect_gaps=True):
     of cross-run consistency.
     """
     logger = calc._logger
-    logger.info("=== TRUNCATING SIMULATIONS TO MINIMUM RUNTIME ===")
 
     for leg in calc.legs:
-        logger.info(f"=== {leg.leg_type.name} LEG ===")
-
         for stage in leg.stages:
-            logger.info(f"--- {stage.stage_type.name} STAGE ---")
             stage_has_issues = False
 
             for lam_window in stage.lam_windows:
@@ -149,7 +145,7 @@ def truncate_simulations_to_minimum(calc, detect_gaps=True):
                 # If any sim has a gap, enforce the first-block trimming per sim  
                 if detect_gaps and any(had_gaps): 
                     logger.info(
-                        f"Lambda {lam_window.lam:.3f}: gaps detected → trimming each run to its first contiguous block"  
+                        f"❌ Leg {leg.leg_type.name} Stage {stage.stage_type.name} Lambda {lam_window.lam:.3f}: gaps detected → trimming each run to its first contiguous block"  
                     )
                     for sim, fb_time in zip(lam_window.sims, first_block_times):
                         truncate_simulation_file(sim, fb_time, logger, detect_gaps=False)  # (turn off inner gap logic)
@@ -162,7 +158,7 @@ def truncate_simulations_to_minimum(calc, detect_gaps=True):
 
                 if abs(max_time - min_time) > 0.01:
                     stage_has_issues = True
-                    logger.warning(f"Lambda {lam_window.lam:.3f}: Inconsistent times {sim_times}")
+                    logger.warning(f"❌ Leg {leg.leg_type.name} Stage {stage.stage_type.name} Lambda {lam_window.lam:.3f}: Inconsistent times {sim_times}")
                     logger.warning(f"  -> Truncating to minimum: {min_time:.6f} ns")
 
                     for i, sim in enumerate(lam_window.sims):
@@ -173,11 +169,11 @@ def truncate_simulations_to_minimum(calc, detect_gaps=True):
                             )
                 else:
                     logger.debug(
-                        f"Lambda {lam_window.lam:.3f}: ✓ All runs consistent at {min_time:.6f} ns"
+                        f"Lambda {lam_window.lam:.3f}: ✅ All runs consistent at {min_time:.6f} ns"
                     )
 
             if not stage_has_issues:
-                logger.info(f"  ✓ Stage {stage.stage_type.name} has no timing issues")
+                logger.info(f" ✅ Leg {leg.leg_type.name} Stage {stage.stage_type.name} has no timing issues")
 
     logger.info("=== TRUNCATION COMPLETE ===")
 
@@ -306,7 +302,7 @@ def verify_truncation(calc):
                 else:
                     logger.debug(
                         f"Leg {leg.leg_type.name} Stage {stage.stage_type.name} "
-                        f"Lambda {lam_window.lam:.3f}: ✓ Consistent at {min_time:.6f} ns"
+                        f"Lambda {lam_window.lam:.3f}: ✅ Consistent at {min_time:.6f} ns"
                     )
 
     if all_consistent:
@@ -327,7 +323,7 @@ def fix_simulation_times(calc, apply_truncation=True, detect_gaps=True):
     """
     logger = calc._logger
     if apply_truncation:
-        logger.info("Starting simulation time truncation process...")
+        logger.info("Starting simulation time fixing process...")
         truncate_simulations_to_minimum(calc, detect_gaps=detect_gaps)
 
     success = verify_truncation(calc)
