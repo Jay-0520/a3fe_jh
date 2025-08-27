@@ -7,20 +7,6 @@ def _get_actual_simtime_from_file(sim, timestep_ns=4e-6, detect_gaps=True):
     """
     Robustly determine the actual simulation time from simfile.dat
     by scanning to the last valid data line, with optional gap detection.
-    
-    Parameters
-    ----------
-    sim : a3fe.Simulation
-        Simulation object
-    timestep_ns : float
-        Simulation timestep in ns (default 4 fs = 4e-6 ns)
-    detect_gaps : bool
-        If True, detect large gaps in step numbers and truncate to largest contiguous block
-    
-    Returns
-    -------
-    float
-        Actual usable simulation time in ns
     """
     simfile_path = os.path.join(sim.output_dir, "simfile.dat")
     if not os.path.exists(simfile_path) or os.stat(simfile_path).st_size == 0:
@@ -66,12 +52,13 @@ def _get_actual_simtime_from_file(sim, timestep_ns=4e-6, detect_gaps=True):
     end_idx = first_gap_idx  # End at the first gap (inclusive)
     block_size = end_idx - start_idx + 1
     
-    sim._logger.info(f"Gap detection results for {simfile_path}:")
-    sim._logger.info(f"  Total steps: {len(steps)}")
-    sim._logger.info(f"  Median interval: {median_interval}")
-    sim._logger.info(f"  Large gaps found: {len(large_gaps)}")
-    sim._logger.info(f"  [ACTUAL SIMTIME] Using first contiguous block: steps {steps[start_idx]} to {steps[end_idx]} ({block_size} entries)")
-    
+    if detect_gaps:
+        sim._logger.info(f"Gap detection results for {simfile_path}:")
+        sim._logger.info(f"  Total steps: {len(steps)}")
+        sim._logger.info(f"  Median interval: {median_interval}")
+        sim._logger.info(f"  Large gaps found: {len(large_gaps)}")
+        sim._logger.info(f"  [ACTUAL SIMTIME] Using first contiguous block: steps {steps[start_idx]} to {steps[end_idx]} ({block_size} entries)")
+        
     # Return time based on largest contiguous block
     return steps[end_idx] * timestep_ns
 
@@ -123,9 +110,6 @@ def truncate_simulations_to_minimum(calc, detect_gaps=True):
     UPDATED POLICY: if a gap exists in any sim, ALWAYS truncate that sim
     to the end of its first contiguous block (delete the rest), regardless
     of cross-run consistency.
-
-    In practice, we might have to run this multiple times if there are
-    multiple gaps as well as inconsistent runtimes in different runs.
     """
     logger = calc._logger
     logger.info("=== TRUNCATING SIMULATIONS TO MINIMUM RUNTIME ===")
@@ -153,10 +137,10 @@ def truncate_simulations_to_minimum(calc, detect_gaps=True):
                     fb_details.append(details)       
 
                     # For consistency checks, use the "effective" time we intend to rely on
-                    sim_times.append(fb_time)  # UPDATED: use first-block time
+                    sim_times.append(fb_time) 
 
                     if had_gap:
-                        logger.info(
+                        logger.warning(
                             f"  Gap detected in {os.path.join(sim.output_dir, 'simfile.dat')}: "
                             f"keeping first block steps {details.get('start_step')}–{details.get('end_step')} "
                             f"({details.get('block_len')} entries)"  
@@ -252,7 +236,7 @@ def truncate_simulation_file(simulation, target_time_ns, logger, detect_gaps=Tru
                 first_gap_idx = large_gaps[0]
                 start_idx = 0
                 end_idx = first_gap_idx
-                logger.info(f"     Gap detected in {simfile_path}")
+                logger.warning(f"     Gap detected in {simfile_path}")
                 logger.info(
                     f"     Using first contiguous block: steps {step_nums[start_idx]} to {step_nums[end_idx]} "
                     f"({end_idx - start_idx + 1} entries)"
@@ -338,10 +322,8 @@ def fix_simulation_times(calc, apply_truncation=True, detect_gaps=True):
     """
     Complete workflow to fix inconsistent simulation times.
     
-    Parameters
-    ----------
-    calc : a3fe.Calculation
-        The calculation object to fix
+    In practice, we might have to run this multiple times if there are
+    multiple gaps as well as inconsistent runtimes in different runs.
     """
     logger = calc._logger
     if apply_truncation:
