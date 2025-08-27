@@ -1,5 +1,7 @@
 """
 simple mbar logging and concurrent somd execution in local machine
+
+okay we may not need this ConcurrentSOMDManager class after all, as a3fe already handles concurrent somd jobs quite well.
 """
 import os
 
