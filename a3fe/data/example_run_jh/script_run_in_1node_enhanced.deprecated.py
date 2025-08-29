@@ -481,6 +481,7 @@ class ParallelMBARManager:
         self.job_counter = itertools.count(600000)
         self.expected_outputs = set()
         self.logger = get_tagged_logger(__name__ + ".MBAR_MANAGER")
+        self.jobs_by_leg_stage = {} 
 
     def submit_mbar_job(self, script_path: str, cwd: str) -> int:
         """Submit an MBAR job for parallel execution."""
@@ -614,7 +615,7 @@ class ParallelMBARManager:
             ofile = _extract_mbar_output_file(cmd)
             success = False
             if ofile is None:
-                self.logger.error(f"MBAR job {job_id} did not produce an output file")
+                self.logger.error(f"MBAR job {job_id} did not produce an output file with run command: {cmd}")
                 rc = -1
             else:
                 # when ofile is not None
@@ -632,7 +633,7 @@ class ParallelMBARManager:
                     fail += 1
                     error_msg = stderr if stderr else "Output file missing or empty"
                     if not use_pb:
-                        self.logger.warning(f"MBAR job {job_id} failed: {error_msg}")
+                        self.logger.warning(f"MBAR job {job_id} failed: {error_msg} with run command: {cmd}")
 
             self._log_mbar_completion(
                 cwd=cwd,
@@ -1259,7 +1260,7 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
                         # Job still running
                         if not hasattr(job, "_logged_running"):
                             logger.info(
-                                f"[LOCAL UPDATE] 🟡 Concurrent SOMD job {job.slurm_job_id} running, {job_sim_info}"
+                                f"[LOCAL UPDATE] Concurrent SOMD job {job.slurm_job_id} running, {job_sim_info}"
                             )
                             job._logged_running = True
                 continue
