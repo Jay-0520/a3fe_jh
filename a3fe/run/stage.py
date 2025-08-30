@@ -418,7 +418,7 @@ class Stage(_SimulationRunner):
             self.virtual_queue.update()
 
             # Check if everything has finished
-            for win in self.running_wins:
+            for win in list(self.running_wins):
                 # Check if the window has now finished - calling win.running updates the win._running attribute
                 if not win.running:
                     self._logger.info(f"{win} has finished at {win.tot_simtime:.3f} ns")
@@ -467,7 +467,7 @@ class Stage(_SimulationRunner):
                     return
                 # Update the queue before checking the simulations
                 self.virtual_queue.update()
-                for win in self.running_wins:
+                for win in list(self.running_wins):
                     if not win.running:
                         self.running_wins.remove(win)
                     # Write status after checking for running and equilibration, as the
