@@ -287,6 +287,7 @@ def _parse_sim_info_from_job(job) -> str:
         '/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_again2_copy1/
         bound/vanish/output/lambda_0.000/run_01/run_somd.sh', '0.0']
     """
+    leg_type = "?"
     stage = "?"
     lam = "?"
     run_no = "?"
@@ -307,10 +308,10 @@ def _parse_sim_info_from_job(job) -> str:
             cwd = job.command_list[idx + 1]
 
     if isinstance(cwd, str):
-        # stage: e.g., .../bound/vanish/output/...
-        m_stage = re.search(r"/(?:bound|free)/([^/]+)/output/", cwd)
-        if m_stage:
-            stage = m_stage.group(1)
+        m_leg_stage = re.search(r"[\\/](bound|free)[\\/](.*?)[\\/]output[\\/]", cwd)
+        if m_leg_stage:
+            leg_type = m_leg_stage.group(1)
+            stage = m_leg_stage.group(2)
 
         # run number: e.g., .../run_01
         m_run = re.search(r"run_(\d+)", cwd)
@@ -324,19 +325,27 @@ def _format_sim_info(cwd: str, lam_arg: str = None) -> str:
     """
     Given a working directory (the --chdir path), an optional lambda string,
     and an optional restraint type, returns:
-       "stage=<stage>, lam=<lam>, run_no=<run_no>[, restraint=<type>]"
+       "leg=<leg>, stage=<stage>, lam=<lam>, run_no=<run_no>"
     """
-    # parse lam from argument or from cwd
+    # parse lambda from argument or from cwd
     if lam_arg is None:
         m_lam = re.search(r"/lambda_([0-9.]+)/", cwd)
         lam_arg = m_lam.group(1) if m_lam else "?"
-    # parse stage
+
+    # parse leg (bound/free)
+    m_leg = re.search(r"/(bound|free)/", cwd)
+    leg = m_leg.group(1) if m_leg else "?"
+
+    # parse stage (vanish, restrain, discharge, etc.)
     m_stage = re.search(r"/(?:bound|free)/([^/]+)/output/", cwd)
     stage = m_stage.group(1) if m_stage else "?"
+
     # parse run number
     m_run = re.search(r"/run_(\d+)", cwd)
     run_no = m_run.group(1) if m_run else "?"
-    parts = [f"stage={stage}", f"lam={lam_arg}", f"run_no={run_no}"]
+
+    # build parts
+    parts = [f"leg={leg}", f"stage={stage}", f"lam={lam_arg}", f"run_no={run_no}"]
     return ", ".join(parts)
 
 
@@ -680,7 +689,7 @@ class ParallelMBARManager:
 # Global SOMD Manager FOR LOCAL AND CONCURRENT EXECUTION
 # ========================================================
 class ConcurrentSOMDManager:
-    """Manages concurrent SOMD executions with MPS support."""
+    """Manages concurrent SOMD executions with MPS support and with proper synchronization."""
     
     def __init__(self, max_workers=2, enable_mps=True):
         self.max_workers = max_workers

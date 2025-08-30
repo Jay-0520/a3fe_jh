@@ -37,6 +37,7 @@ from tqdm import tqdm
 import sys
 import shlex
 from collections import defaultdict
+from decimal import Decimal
 from a3fe.run.fix_simulation_times import fix_simulation_times
 
 # Configuration options
@@ -281,14 +282,16 @@ def add_filter_recursively(obj, filter_instance=shared_filter):
 # ==================================================
 # UTILITY FUNCTIONS FOR LOCAL EXECUTION
 # ==================================================
-def _parse_sim_info_from_job(job) -> str:
+def _parse_sim_info_from_job(job: Job) -> str:
     """
     Job.command_list is like:
       ['--chdir', '/Users/jingjinghuang/Documents/fep_workflow/
         test_somd_run_again2_copy1/bound/vanish/output/lambda_0.000/run_01',
         '/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_again2_copy1/
         bound/vanish/output/lambda_0.000/run_01/run_somd.sh', '0.0']
+    Returns a string like: "leg=<leg>, stage=<stage>, lam=<lam>, run_no=<run_no>"
     """
+    leg_type = "?"
     stage = "?"
     lam = "?"
     run_no = "?"
@@ -296,8 +299,8 @@ def _parse_sim_info_from_job(job) -> str:
     # Lambda is last element if numeric
     try:
         potential_lam = job.command_list[-1]
-        float(potential_lam)
-        lam = potential_lam
+        # must use string to get logging like this "lam=0.000" and not "lam=0.0"
+        lam = f"{Decimal(str(potential_lam)):.3f}"
     except Exception:
         pass
 
@@ -309,19 +312,19 @@ def _parse_sim_info_from_job(job) -> str:
             cwd = job.command_list[idx + 1]
 
     if isinstance(cwd, str):
-        # stage: e.g., .../bound/vanish/output/...
-        m_stage = re.search(r"/(?:bound|free)/([^/]+)/output/", cwd)
-        if m_stage:
-            stage = m_stage.group(1)
+        m_leg_stage = re.search(r"[\\/](bound|free)[\\/](.*?)[\\/]output[\\/]", cwd)
+        if m_leg_stage:
+            leg_type = m_leg_stage.group(1)
+            stage = m_leg_stage.group(2)
 
         # run number: e.g., .../run_01
         m_run = re.search(r"run_(\d+)", cwd)
         if m_run:
             run_no = m_run.group(1)
 
-    return f"stage={stage}, lam={lam}, run_no={run_no}"
+    return f"leg={leg_type}, stage={stage}, lam={lam}, run_no={run_no}"
 
-
+# TODO: we may need to consolidate the two functions below
 def _format_sim_info(cwd: str, lam_arg: str = None) -> str:
     """
     Given a working directory (the --chdir path), an optional lambda string,
@@ -348,6 +351,14 @@ def _format_sim_info(cwd: str, lam_arg: str = None) -> str:
     # build parts
     parts = [f"leg={leg}", f"stage={stage}", f"lam={lam_arg}", f"run_no={run_no}"]
     return ", ".join(parts)
+
+
+def _parse_leg_stage_from_cwd(cwd: str) -> tuple[str | None, str | None]:
+    m_leg = re.search(r"/(bound|free)/", cwd)
+    m_stage = re.search(r"/(?:bound|free)/([^/]+)/output/", cwd)
+    leg = m_leg.group(1).lower() if m_leg else None
+    stage = m_stage.group(1).lower() if m_stage else None
+    return leg, stage
 
 
 def _mbar_worker(cwd: str, mbar_command: str) -> tuple[int, str, str, float]:
@@ -706,6 +717,7 @@ class ConcurrentSOMDManager:
         self.lambda_runs = defaultdict(set)  # lambda_str -> set of run_nos
         self.lambda_locks = defaultdict(threading.Lock)  # per-lambda synchronization
         self.stage_sync_lock = threading.Lock()
+        self.jobs_by_stage = defaultdict(set)  # (leg, stage) -> {job_ids}
         
         if self.enable_mps:
             self._setup_mps()
@@ -719,7 +731,7 @@ class ConcurrentSOMDManager:
             if result.returncode == 0:
                 self.mps_enabled = True
                 # Set thread percentage for optimal sharing
-                percentage = 200 // self.max_workers
+                percentage = max(10, 100 // self.max_workers)
                 os.environ['CUDA_MPS_ACTIVE_THREAD_PERCENTAGE'] = str(percentage)
                 self.logger.info(f"MPS enabled with {percentage}% thread allocation per process")
             else:
@@ -736,17 +748,21 @@ class ConcurrentSOMDManager:
                 self.logger.info("MPS disabled")
             except Exception as e:
                 self.logger.warning(f"Failed to disable MPS: {e}")
-    
+   
     def submit_somd_job(self, script_path: str, lambda_str: str, cwd: str, run_no: int) -> int:
         """Submit a SOMD job for concurrent execution."""
         job_id = next(self.job_counter)
+        submit_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # TODO: we might need to consolidate the two
+        sim_info = _format_sim_info(cwd, lambda_str)
+        leg, stage = _parse_leg_stage_from_cwd(cwd)
         
         # Track this run for the lambda window
         with self.lambda_locks[lambda_str]:
             self.lambda_runs[lambda_str].add(run_no)
         
         # Submit to executor
-        future = self.executor.submit(self._run_somd_worker, script_path, lambda_str, cwd, run_no)
+        future = self.executor.submit(self._run_somd_worker, job_id, script_path, lambda_str, cwd, run_no)
         self.futures[job_id] = future
 
         # Store metadata
@@ -756,14 +772,26 @@ class ConcurrentSOMDManager:
             'lambda_val': float(lambda_str), 
             'cwd': cwd,
             'run_no': run_no,
-            'start_time': time.time()
+            'start_time': time.time(),
+            'leg': leg,
+            'stage': stage,
         }
+        # track membership for barrier
+        if leg and stage:
+            self.jobs_by_stage[(leg, stage)].add(job_id)
         
-        self.logger.info(f"[CONCURRENT SOMD] Submitted job {job_id} for lambda={lambda_str} run={run_no}")
+        self.logger.info(f"[CONCURRENT SOMD] {submit_timestamp} Submitted SOMD job {job_id} for {sim_info}")
         return job_id
     
-    def _run_somd_worker(self, script_path: str, lambda_str: str, cwd: str, run_no: int):
+    def _run_somd_worker(self, job_id:int, script_path: str, lambda_str: str, cwd: str, run_no: int):
         """Worker function to run a single SOMD simulation."""
+
+        env = os.environ.copy()
+        # prevent BLAS oversubscription when using multiprocessing
+        env.setdefault("OMP_NUM_THREADS", "1")
+        env.setdefault("MKL_NUM_THREADS", "1")
+        env.setdefault("OPENBLAS_NUM_THREADS", "1")
+
         real_cwd = cwd or os.path.dirname(script_path)
 
         start_time = time.time()
@@ -777,7 +805,7 @@ class ConcurrentSOMDManager:
             self.logger.error(f"[CONCURRENT SOMD] ❌ somd.cfg is missing or empty in {real_cwd}")
             with open(local_execution_log_path, "a") as flog:
                 flog.write(
-                    f"[CONCURRENT SOMD] ❌ JOB FAILED {cfg_path} is missing or empty in {real_cwd}; cannot run SOMD\n"
+                    f"[CONCURRENT SOMD] ❌ JOB {job_id} FAILED {cfg_path} is missing or empty in {real_cwd}; cannot run SOMD\n"
                 )
             raise RuntimeError(f"somd.cfg is missing or empty in {real_cwd}")
 
@@ -795,7 +823,7 @@ class ConcurrentSOMDManager:
                         break
         except FileNotFoundError:
             with open(local_execution_log_path, "a") as flog:
-                flog.write(f"[CONCURRENT SOMD] ❌ JOB FAILED missing script {script_path}\n")
+                flog.write(f"[CONCURRENT SOMD] ❌ JOB {job_id} FAILED missing script {script_path}\n")
             raise RuntimeError(f"Script not found: {script_path}")
 
         if not somd_command:
@@ -832,20 +860,20 @@ class ConcurrentSOMDManager:
                 f.write(f"[CONCURRENT SOMD] Starting {sim_info} at {start_timestamp}\n")
                 f.write(f"[CONCURRENT SOMD] Completed {sim_info} at {end_timestamp}\n")
                 f.write(f"[CONCURRENT SOMD] Simulation took {duration_seconds:.2f} seconds\n")
-                f.write("[CONCURRENT SOMD] ✅ Job completed successfully\n")
+                f.write(f"[CONCURRENT SOMD] ✅ Job {job_id} completed successfully\n")
 
-            self.logger.info(f"[CONCURRENT SOMD] ✅ Job completed successfully in {duration_seconds:.2f}s: {sim_info}")
+            self.logger.info(f"[CONCURRENT SOMD] {end_timestamp} ✅ Job {job_id} completed successfully in {duration_seconds:.2f}s: {sim_info}")
             
             return 888888  # Success code
             
         except subprocess.CalledProcessError as e:
             end_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.logger.error(f"[CONCURRENT SOMD] ❌ JOB FAILED with return code {e.returncode}")
+            self.logger.error(f"[CONCURRENT SOMD] ❌ JOB {job_id} FAILED with return code {e.returncode}")
             self.logger.error(f"[CONCURRENT SOMD] ❌ STDERR:\n{e.stderr}")
             
             local_execution_log_path = os.path.join(real_cwd, "local_execution.log")
             with open(local_execution_log_path, "a") as f:
-                f.write(f"[CONCURRENT SOMD] ❌ Job FAILED: {sim_info}\n")
+                f.write(f"[CONCURRENT SOMD] ❌ Job {job_id} FAILED: {sim_info}\n")
                 f.write(f"[CONCURRENT SOMD] Error: {e.stderr}\n")
             raise
     
@@ -853,6 +881,14 @@ class ConcurrentSOMDManager:
             # Remove this run from tracking
             with self.lambda_locks[lambda_str]:
                 self.lambda_runs[lambda_str].discard(run_no)
+            
+            # also drop from stage set on completion
+            meta = self.job_metadata.get(job_id, {})
+            key = (meta.get('leg'), meta.get('stage'))
+            if key in self.jobs_by_stage:
+                self.jobs_by_stage[key].discard(job_id)
+                if not self.jobs_by_stage[key]:
+                    self.jobs_by_stage.pop(key, None)
     
 
     def wait_for_lambda_window(self, lambda_str: str) -> bool:
@@ -885,31 +921,27 @@ class ConcurrentSOMDManager:
         return True
     
 
-    def wait_for_all_jobs(self):
-        """Wait for all submitted jobs to complete"""
-        if not self.futures:
+    def wait_for_stage(self, leg: str, stage: str):
+        """Block until all SOMD jobs for (leg, stage) have finished."""
+        key = (leg.lower(), stage.lower())
+        # Take a snapshot of current job_ids to avoid races with new waves
+        pending_ids = list(self.jobs_by_stage.get(key, set()))
+        if not pending_ids:
             return
-            
-        self.logger.info(f"Waiting for {len(self.futures)} concurrent SOMD jobs to complete...")
-                
-        completed = 0
-        failed = 0
-        
-        for future in concurrent.futures.as_completed(self.futures.values()):
+
+        self.logger.info(f"[CONCURRENT SOMD] 🟡 Waiting for stage={stage}, leg={leg} to finish {len(pending_ids)} jobs...")
+        for jid in pending_ids:
+            fut = self.futures.get(jid)
+            if fut is None:
+                continue
             try:
-                success = future.result()
-                if success:
-                    completed += 1
-                else:
-                    failed += 1
+                fut.result()  # block
             except Exception as e:
-                failed += 1
-                self.logger.error(f"[CONCURRENT SOMD] Job failed with exception: {e}")
-            
-        # Clear completed jobs
-        self.futures.clear()
-        self.job_metadata.clear()
-        self.logger.info(f"[CONCURRENT SOMD] All jobs completed: {completed} success, {failed} failed")
+                self.logger.error(f"[CONCURRENT SOMD] Stage {stage}/{leg} job {jid} failed: {e}")
+        # ensure the set is empty (finally blocks remove them)
+        self.jobs_by_stage.pop(key, None)
+        self.logger.info(f"[CONCURRENT SOMD] Stage={stage}, leg={leg} initial wave finished.")
+
     
     def has_pending_jobs(self):
         """Check if there are pending jobs."""
@@ -1065,8 +1097,8 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
         )
         return
 
-    # Detect GPU availability
     logger.info(f"Force CPU: {FORCE_CPU_PLATFORM}")
+    logger.info(f'Enable MPS: {ENABLE_MPS}')
 
     # Initialize global MBAR manager
     _GLOBAL_MBAR_MANAGER = ParallelMBARManager()
@@ -1162,10 +1194,10 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
         else:
             # Check if this is an MBAR analysis script
             if _is_mbar_script(script_path):
-                return _GLOBAL_MBAR_MANAGER.submit_mbar_job(script_path, cwd)
+                return _GLOBAL_MBAR_MANAGER.submit_mbar_job(script_path, real_cwd)
             else:
                 # This is a preparation step
-                return _run_prep_locally(script_path, cwd)
+                return _run_prep_locally(script_path, real_cwd)
 
     def _run_prep_locally(script_path, cwd) -> int:
         """Run preparation step locally."""
@@ -1277,17 +1309,17 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
                         job.status = _JobStatus.FINISHED
                         job._already_marked_finished = True
                         jobs_to_remove.append(job)
-                        logger.info(f"[CONCURRENT UPDATE] ✅ SOMD job {job.slurm_job_id} finished, {job_sim_info}")
+                        logger.info(f"[CONCURRENT UPDATE] ✅ SOMD job finished! Job_ID: {job.slurm_job_id}, {job_sim_info}")
                 elif status == "FAILED":
                     if not getattr(job, "_already_marked_finished", False):
                         job.status = _JobStatus.FAILED
                         job._already_marked_finished = True
                         jobs_to_remove.append(job)
-                        logger.warning(f"[CONCURRENT UPDATE] ❌ SOMD job {job.slurm_job_id} failed, {job_sim_info}")
+                        logger.warning(f"[CONCURRENT UPDATE] ❌ SOMD job failed! Job_ID: {job.slurm_job_id}, {job_sim_info}")
                 elif status == "RUNNING":
                     if not hasattr(job, "_logged_running"):
                         logger.info(
-                            f"[CONCURRENT UPDATE] 🟡 SOMD job {job.slurm_job_id} running, {job_sim_info}"
+                            f"[CONCURRENT UPDATE] SOMD job running...Job_ID: {job.slurm_job_id}, {job_sim_info}"
                         )
                         job._logged_running = True
 
@@ -1400,127 +1432,6 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
     logger.info("A3FE._virtual_queue was successfully patched for local execution")
 
 
-
-def patch_stage_for_concurrent_sync():
-    """Patch Stage class to analyze efficiency per lambda window as runs complete"""
-    from a3fe.analyse.process_grads import GradientData as _GradientData
-    import numpy as _np
-    from math import ceil as _ceil
-    from time import sleep as _sleep
-
-    original_run_loop_adaptive_efficiency = Stage._run_loop_adaptive_efficiency
-    
-    def concurrent_adaptive_efficiency(
-        self,
-        run_nos: list[int],
-        cycle_pause: int = 60,
-        max_runtime: float = 30,
-    ):
-        """Modified efficiency loop that processes lambda windows individually"""
-        
-        while not self._maximally_efficient:
-            stage_total_simtime = sum(
-                [win.get_tot_simtime(run_nos=run_nos) for win in self.lam_windows]
-            )
-            self._logger.info(
-                f"Current total runtime -> {stage_total_simtime}; "
-                "maximum efficiency for given runtime constant not achieved. "
-                "Allocating simulation time to achieve maximum efficiency..."
-            )
-
-            # Track which lambda windows have been processed in this cycle
-            processed_windows = set()
-            
-            # Main monitoring loop
-            while self.running_wins:
-                _sleep(cycle_pause)
-                if self.kill_thread:
-                    self._logger.info("Kill thread requested: exiting run loop")
-                    return
-                
-                self.virtual_queue.update()
-                
-                # Check each running window to see if it just completed
-                completed_windows = []
-                for win in self.running_wins[:]:  # Use slice copy to avoid modification during iteration
-                    if not win.running:
-                        completed_windows.append(win)
-                        self.running_wins.remove(win)
-                        win._update_log()
-                
-                # Process efficiency analysis for newly completed windows
-                for win in completed_windows:
-                    if win not in processed_windows:
-                        self._process_lambda_window_efficiency(win, run_nos, max_runtime)
-                        processed_windows.add(win)
-                
-                self._dump()
-
-            # Check if we've reached maximum efficiency (no more windows need resubmission)
-            if not self.running_wins:
-                self._maximally_efficient = True
-                self._logger.info(
-                    "Maximum efficiency for given runtime constant of "
-                    f"{self.runtime_constant} kcal**2 mol**-2 ns**-1 achieved"
-                )
-
-    def _process_lambda_window_efficiency(self, win, run_nos, max_runtime):
-        """Process efficiency analysis for a single lambda window"""
-        # Calculate gradient data for this specific window
-        gradient_data = _GradientData(lam_winds=[win], equilibrated=False)
-        smooth_dg_sems = gradient_data.get_time_normalised_sems(
-            origin="inter_delta_g", smoothen=True
-        )
-        
-        if len(smooth_dg_sems) == 0:
-            win._logger.warning("No gradient data available for efficiency analysis")
-            return
-            
-        normalised_sem_dg = smooth_dg_sems[0]  # Only one window
-        predicted_run_time_max_eff = (
-            1 / _np.sqrt(self.runtime_constant * self.relative_simulation_cost)
-        ) * normalised_sem_dg
-        actual_run_time = win.get_tot_simtime(run_nos=run_nos)
-        
-        # Log efficiency analysis (this produces your desired logging)
-        win._logger.info(
-            f"Predicted maximum efficiency run time for is {predicted_run_time_max_eff:.3f} ns"
-        )
-        win._logger.info(f"Actual run time is {actual_run_time} ns")
-        
-        # Check maximum runtime limit
-        if predicted_run_time_max_eff > max_runtime * win.ensemble_size:
-            win._logger.info(
-                f"Predicted maximum efficiency run time per window is "
-                f"{predicted_run_time_max_eff / win.ensemble_size:.3f}, which exceeds the maximum runtime of "
-                f"{max_runtime} ns. Running to the maximum runtime instead."
-            )
-            predicted_run_time_max_eff = max_runtime * win.ensemble_size
-            
-        if actual_run_time < predicted_run_time_max_eff:
-            resubmit_time = (predicted_run_time_max_eff - actual_run_time) / win.ensemble_size
-            # Limit resubmission time
-            if resubmit_time > actual_run_time / win.ensemble_size:
-                resubmit_time = actual_run_time / win.ensemble_size
-            resubmit_time = (_ceil(resubmit_time * 10) / 10)  # Round up to nearest 0.1 ns
-            
-            if resubmit_time > 0:
-                win._logger.info(
-                    f"Window has not reached maximum efficiency. Resubmitting for {resubmit_time:.3f} ns"
-                )
-                win.run(run_nos=run_nos, runtime=resubmit_time)
-                self.running_wins.append(win)  # Add back to running list
-        else:
-            win._logger.info(
-                f"Window has reached the most efficient run time at {actual_run_time}. "
-                "No further simulation required"
-            )
-
-    # Apply the patches
-    Stage._run_loop_adaptive_efficiency = concurrent_adaptive_efficiency
-    Stage._process_lambda_window_efficiency = _process_lambda_window_efficiency
-
-
 def patch_logging_into_local_execution_log():
     """
     Simply move loggings like:
@@ -1585,7 +1496,7 @@ def patch_logging_into_local_execution_log():
     logger.info("Patched some logging into local_execution.log for clearer output")
 
 
-def patch_shorter_runtime_when_resuming(new_runtime=0.1):
+def patch_shorter_runtime_when_resuming(new_runtime=0.0):
     """
     Directly patch the hardcoded runtime=0.2 to runtime=0.1 in Stage._run_without_threading
 
@@ -1637,6 +1548,22 @@ def patch_shorter_runtime_when_resuming(new_runtime=0.1):
                 win.run(run_nos=run_nos, runtime=runtime)
                 win._update_log()
                 self._dump()
+
+            try:
+                leg_name = getattr(self.leg_type, "name", "bound").lower()
+            except Exception:
+                raise
+            try:
+                stage_name = getattr(self.stage_type, "name", "vanish").lower()
+            except Exception:
+                raise
+
+            if _GLOBAL_SOMD_MANAGER:
+                self._logger.info(
+                    f"[STAGE BARRIER] Waiting for all lambda windows to complete initial runs "
+                    f"before efficiency check (stage={stage_name}, leg={leg_name})"
+                )
+                _GLOBAL_SOMD_MANAGER.wait_for_stage(leg_name, stage_name)
 
             # Periodically check the simulations and analyse/ resubmit as necessary
             # Copy to ensure that we don't modify self.lam_windows when updating self.running_wins
@@ -1855,7 +1782,6 @@ if __name__ == "__main__":
     # SKIP_ADAPTIVE_EFFICIENCY = True  # skip the adaptive efficiency optimization loop
 
     patch_virtual_queue_for_local_execution()
-    patch_stage_for_concurrent_sync()
 
     patch_logging_into_local_execution_log()
 
