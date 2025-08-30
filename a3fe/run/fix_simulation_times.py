@@ -284,7 +284,7 @@ def verify_truncation(calc):
                     t_ns = _get_actual_simtime_from_file(
                         sim,
                         timestep_ns=getattr(sim, "timestep", 4e-6),
-                        detect_gaps=False, 
+                        detect_gaps=True, 
                     )
                     sim_times.append(t_ns)
 
