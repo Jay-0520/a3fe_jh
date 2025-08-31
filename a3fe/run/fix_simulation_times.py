@@ -4,17 +4,13 @@ import subprocess
 import numpy as np
 from pathlib import Path
 from typing import Tuple, List
+import os, json, glob, shutil, time
+from datetime import datetime
+from a3fe.run.enums import LegType as _LegType, StageType as _StageType
 
 # ==================================================
 # RUNTIME UTILITIES
 # ==================================================
-def _replace_step(line: str, new_step: int) -> str:
-    """Replace only the first column with new_step, preserve spacing and trailing spaces."""
-    idx = line.find(" ")
-    if idx == -1:  # defensive, shouldn't happen for valid lines
-        return str(new_step) + "\n"
-    return f"{new_step}{line[idx:]}"
-    
 def _get_actual_simtime_from_file(sim, timestep_ns=4e-6, detect_gaps=True):
     """
     Robustly determine the actual simulation time from simfile.dat
@@ -347,6 +343,49 @@ def fix_simulation_times(calc, apply_truncation=True, detect_gaps=True):
 # ============================================
 _MARK = ".extend_meta.json"
 
+def _split_header_and_data(lines):
+    header, data = [], []
+    for ln in lines:
+        if ln.startswith("#") or not ln.strip():
+            header.append(ln)
+        else:
+            data.append(ln)
+    return header, data
+
+def _parse_step_from_line(line):
+    # robust: ignore trailing spaces, tabs, multiple spaces
+    s = line.strip()
+    if not s:
+        return None
+    parts = s.split()
+    try:
+        return int(parts[0])
+    except Exception:
+        return None
+
+
+def _find_window(calc, leg_name, stage_name, lam):
+    # minimal resolver; adapt if your enums differ
+    leg = next((L for L in calc.legs if L.leg_type.name.lower() == leg_name.lower()), None)
+    if not leg:
+        return None
+    stage = next((S for S in leg.stages if S.stage_type.name.lower() == stage_name.lower()), None)
+    if not stage:
+        return None
+    win = next((W for W in stage.lam_windows if abs(W.lam - float(lam)) < 1e-9), None)
+    if not win:
+        return None
+    return leg, stage, win
+
+
+def _replace_step(line: str, new_step: int) -> str:
+    """Replace only the first column with new_step, preserve spacing and trailing spaces."""
+    idx = line.find(" ")
+    if idx == -1:  # defensive, shouldn't happen for valid lines
+        return str(new_step) + "\n"
+    return f"{new_step}{line[idx:]}"
+
+
 def _read_sim_lines(path: Path) -> Tuple[List[str], List[Tuple[int, float, str]]]:
     """Return (headers, [(step, time_ns, line), ...]) for a simfile-like file."""
     if not path.exists() or path.stat().st_size == 0:
@@ -518,3 +557,205 @@ def merge_all_extensions(calc, new_file="simfile.dat", out_file="simfile.dat"):
         except Exception as e:
             logger.warning(f"[extend] Merge skipped for {run_dir}: {e}")
     logger.info(f"[extend] Completed merge in {ok} run directories.")
+
+
+# ---------- public API: call this BEFORE you (re)launch the extension ----------
+def start_extension_for_lambda(calc, leg, stage, lam):
+    """
+    For the specified λ window:
+      - Read current simfile.dat to record the last kept step.
+      - Move simfile.dat → simfile.preext.<timestamp>.dat (so SOMD creates a fresh file).
+      - Write extend_meta.json with provenance for later merge.
+
+    Run this *before* you relaunch SOMD from its checkpoint.
+    """
+    logger = calc._logger
+    found = _find_window(calc, leg, stage, lam)
+    if not found:
+        logger.error(f"[extend] λ-window not found: leg={leg}, stage={stage}, λ={lam}")
+        return False
+
+    _, _, win = found
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ok = True
+
+    for sim in win.sims:
+        simdir = sim.output_dir
+        simfile = os.path.join(simdir, "simfile.dat")
+        if not os.path.exists(simfile) or os.path.getsize(simfile) == 0:
+            logger.warning(f"[extend] {simdir}: no existing simfile.dat; nothing to snapshot")
+            last_step = None
+            pre_snapshot = None
+        else:
+            with open(simfile, "r") as f:
+                lines = f.readlines()
+            _, data = _split_header_and_data(lines)
+            steps = [st for st in (_parse_step_from_line(ln) for ln in data) if st is not None]
+            last_step = steps[-1] if steps else None
+
+            # move aside so SOMD writes a fresh file
+            pre_snapshot = os.path.join(simdir, f"simfile.preext.{ts}.dat")
+            shutil.move(simfile, pre_snapshot)
+            logger.info(f"[extend] {simdir}: moved simfile.dat → {os.path.basename(pre_snapshot)} "
+                        f"(last_step={last_step})")
+
+        # persist minimal metadata to guide the merge
+        meta = {
+            "snapshot": os.path.basename(pre_snapshot) if pre_snapshot else None,
+            "last_step_before_extension": int(last_step) if last_step is not None else None,
+            "created_at": ts,
+            "note": "simfile moved aside so SOMD writes a fresh file"
+        }
+        with open(os.path.join(simdir, "extend_meta.json"), "w") as jf:
+            json.dump(meta, jf, indent=2)
+
+        # (optional) touch a marker so you can tell fresh writes occurred
+        open(os.path.join(simdir, "simfile.FRESH_PENDING"), "w").close()
+
+    return ok
+
+# ---------- public API: call this AFTER the extension finishes ----------
+def merge_extension_for_lambda(calc, leg, stage, lam, *, renumber_post=True):
+    """
+    Merge a λ window’s fresh simfile.dat into the pre-extension snapshot.
+    - If renumber_post=True, shift post steps to be contiguous (no gap).
+    - Keeps headers, writes simfile.dat.bak, and replaces atomically.
+    """
+    logger = calc._logger
+    found = _find_window(calc, leg, stage, lam)
+    if not found:
+        logger.error(f"[extend] λ-window not found: leg={leg}, stage={stage}, λ={lam}")
+        return False
+
+    _, _, win = found
+    all_ok = True
+
+    for sim in win.sims:
+        simdir   = sim.output_dir
+        simfile  = os.path.join(simdir, "simfile.dat")
+        meta_path= os.path.join(simdir, "extend_meta.json")
+
+        if not (os.path.exists(meta_path) and os.path.exists(simfile)):
+            logger.warning(f"[extend] {simdir}: missing extend_meta.json or simfile.dat; skipping")
+            all_ok = False
+            continue
+
+        with open(meta_path, "r") as jf:
+            meta = json.load(jf)
+
+        snap_name = meta.get("snapshot")
+        last_keep = meta.get("last_step_before_extension")
+        snap_path = os.path.join(simdir, snap_name) if snap_name else None
+
+        if not snap_path or not os.path.exists(snap_path):
+            logger.warning(f"[extend] {simdir}: snapshot not found; cannot merge safely")
+            all_ok = False
+            continue
+
+        # read snapshot and fresh file
+        with open(snap_path, "r") as f:
+            snap_lines = f.readlines()
+        with open(simfile, "r") as f:
+            fresh_lines = f.readlines()
+
+        snap_header,  snap_data  = _split_header_and_data(snap_lines)
+        fresh_header, fresh_data = _split_header_and_data(fresh_lines)
+        header = snap_header if snap_header else fresh_header
+
+        # pre block steps and interval
+        pre_steps = [st for st in (_parse_step_from_line(ln) for ln in snap_data) if st is not None]
+        pre_last  = pre_steps[-1] if pre_steps else None
+        if len(pre_steps) >= 3:
+            median_interval = int(np.median(np.diff(pre_steps)))
+            if median_interval <= 0:
+                median_interval = 1
+        else:
+            median_interval = 1000  # fallback
+
+        # post (fresh) lines strictly after snapshot’s last_keep
+        post_raw, post_steps = [], []
+        for ln in fresh_data:
+            st = _parse_step_from_line(ln)
+            if st is None:
+                continue
+            if (last_keep is None) or (st > int(last_keep)):
+                post_raw.append(ln)
+                post_steps.append(st)
+
+        if not post_raw:
+            logger.info(f"[extend] {simdir}: no new lines to append; leaving as-is")
+            # clean up the marker if present
+            try:
+                os.remove(os.path.join(simdir, "simfile.FRESH_PENDING"))
+            except FileNotFoundError:
+                pass
+            continue
+
+        # Optionally renumber to remove the gap
+        offset_applied = 0
+        if renumber_post and pre_last is not None:
+            first_post   = post_steps[0]
+            target_first = pre_last + median_interval
+            offset_applied = first_post - target_first  # we subtract this from post steps
+
+            renumbered = []
+            for ln, st in zip(post_raw, post_steps):
+                new_step = int(st - offset_applied)
+                # guard: enforce strict monotonic increase beyond pre_last
+                if new_step <= pre_last:
+                    new_step = pre_last + median_interval
+                rest = ln.strip().split(maxsplit=1)
+                if len(rest) == 1:
+                    new_ln = f"{new_step}\n"
+                else:
+                    new_ln = f"{new_step} {rest[1]}\n"
+                renumbered.append(new_ln)
+
+            logger.info(
+                f"[extend] {simdir}: de-gapped post block (shift -{offset_applied}, "
+                f"interval={median_interval})"
+            )
+        else:
+            renumbered = [ln if ln.endswith("\n") else (ln + "\n") for ln in post_raw]
+            if not renumber_post:
+                logger.info(f"[extend] {simdir}: kept original post steps (gap retained)")
+
+        # merge (drop any accidental overlaps)
+        merged = list(snap_data)
+        for ln in renumbered:
+            st = _parse_step_from_line(ln)
+            if st is None or (pre_last is not None and st <= pre_last):
+                continue
+            merged.append(ln)
+
+        # write safely
+        bak = simfile + ".bak"
+        out = simfile + ".merged"
+        shutil.copy2(simfile, bak)
+        with open(out, "w") as f:
+            for ln in header:
+                f.write(ln if ln.endswith("\n") else ln + "\n")
+            for ln in merged:
+                f.write(ln if ln.endswith("\n") else ln + "\n")
+        os.replace(out, simfile)
+
+        # update meta/provenance
+        meta.setdefault("merge", {})
+        meta["merge"]["renumber_post"] = bool(renumber_post)
+        meta["merge"]["median_interval"] = int(median_interval)
+        meta["merge"]["offset_applied"] = int(offset_applied)
+        meta["merge"]["pre_last_step"] = int(pre_last) if pre_last is not None else None
+        meta["merge"]["first_post_raw_step"] = int(post_steps[0])
+        with open(meta_path, "w") as jf:
+            json.dump(meta, jf, indent=2)
+
+        # clean marker
+        try:
+            os.remove(os.path.join(simdir, "simfile.FRESH_PENDING"))
+        except FileNotFoundError:
+            pass
+
+        appended = len(merged) - len(snap_data)
+        logger.info(f"[extend] {simdir}: merged; appended {appended} lines; backup -> {bak}")
+
+    return all_ok
