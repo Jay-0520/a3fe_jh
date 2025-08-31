@@ -38,7 +38,7 @@ import sys
 import shlex
 from collections import defaultdict
 from decimal import Decimal
-from a3fe.run.fix_simulation_times import fix_simulation_times
+from a3fe.run.fix_simulation_times import fix_simulation_times, prepare_all_runs_for_extension, merge_all_extensions
 
 # Configuration options
 FORCE_LOCAL_EXECUTION = True  # Set to False for normal SLURM execution
@@ -46,7 +46,7 @@ FORCE_CPU_PLATFORM = False  # Set to True to force CPU even on GPU systems
 FAST_UPDATE_INTERVAL = 3  # seconds between updates for local execution
 SKIP_ADAPTIVE_EFFICIENCY = False  # Set to True to skip adaptive efficiency checks
 ENABLE_MPS = True  # Enable NVIDIA MPS for GPU jobs on HPC (DRAC)
-MAX_CONCURRENT_SOMD = 1  # only 2 concurrent somd jobs per GPU to avoid oversubscription
+MAX_CONCURRENT_SOMD = 2  # only 2 concurrent somd jobs per GPU to avoid oversubscription
 
 # ==================================================
 # LOGGING SETUP FOR LOCAL EXECUTION
@@ -68,7 +68,7 @@ class ColorFormatter(logging.Formatter):
         if not hasattr(record, "tag"):
             record.tag = ""
         fmt = self.FORMATS.get(record.levelno, "%(levelname)s: %(message)s")
-        return logging.Formatter(fmt).format(record)
+        return logging.Formatter(fmt=fmt, datefmt="%Y-%m-%d %H:%M:%S").format(record)
 
 
 def get_tagged_logger(name: str, tag: str | None = None) -> logging.LoggerAdapter:
@@ -1782,12 +1782,10 @@ if __name__ == "__main__":
     # SKIP_ADAPTIVE_EFFICIENCY = True  # skip the adaptive efficiency optimization loop
 
     patch_virtual_queue_for_local_execution()
-
     patch_logging_into_local_execution_log()
 
     # _debug_patch_stage_skip_adaptive_efficiency()
     # _debug_patch_force_not_equilibrated()
-    # fix_simulation_times(calc)
     a3.Calculation.required_legs = [_LegType.BOUND]
     sysprep_cfg = SystemPreparationConfig(slurm=True)  # use default settings
 
@@ -1800,17 +1798,16 @@ if __name__ == "__main__":
     calc.setup(
         bound_leg_sysprep_config=sysprep_cfg,
         free_leg_sysprep_config=sysprep_cfg,
-        # skip_preparation=True,
     )
 
     add_filter_recursively(calc)
-    patch_shorter_runtime_when_resuming(0.00)
 
-    # calc.get_optimal_lam_vals(delta_er=0.5)
-    calc.run(adaptive=True, parallel=True)
+    calc.get_optimal_lam_vals()
+    calc.run(adaptive=True,
+             parallel=True)              # run things sequentially
 
-    # calc.analyse()
-    # calc.save()
-
+    calc.wait()
+    calc.analyse()
+    calc.save()
 
 
