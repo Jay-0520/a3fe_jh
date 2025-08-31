@@ -542,7 +542,7 @@ def fix_simulation_times(
                 )
 
     # 3) Truncation pass
-    if apply_truncation and not apply_auto_restart:
+    if apply_truncation and not apply_auto_restart and not dry_run:
         logger.info("Starting simulation time fixing process (truncate pass)...")
         truncate_simulations_to_minimum(calc, detect_gaps=detect_gaps)
 
