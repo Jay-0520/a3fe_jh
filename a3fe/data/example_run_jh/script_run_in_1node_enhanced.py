@@ -1,6 +1,5 @@
 """
-simple mbar logging and concurrent somd execution in local machine
-
+Version: v4.0
 This script is enhanced such ways:
     - improved logging with deduplication of repetitive status messages
     - parallel MBAR execution with proper logging and dummy output creation if needed
@@ -52,7 +51,7 @@ FORCE_CPU_PLATFORM = False  # Set to True to force CPU even on GPU systems
 FAST_UPDATE_INTERVAL = 3  # seconds between updates for local execution
 SKIP_ADAPTIVE_EFFICIENCY = False  # Set to True to skip adaptive efficiency checks
 ENABLE_MPS = True  # Enable NVIDIA MPS for GPU jobs on HPC (DRAC)
-MAX_CONCURRENT_SOMD = 2  # only 2 concurrent somd jobs per GPU to avoid oversubscription
+MAX_CONCURRENT_SOMD = 4  # only 2 concurrent somd jobs per GPU to avoid oversubscription
 MPS_THREAD_PERCENTAGE=None 
 
 # ==================================================
@@ -1795,8 +1794,7 @@ if __name__ == "__main__":
     FORCE_LOCAL_EXECUTION = True
     FORCE_CPU_PLATFORM = True
     ENABLE_MPS=True
-    MAX_CONCURRENT_SOMD=5
-    # SKIP_ADAPTIVE_EFFICIENCY = True  # skip the adaptive efficiency optimization loop
+    MAX_CONCURRENT_SOMD=5  # It seems we should set this to 5 in HPC
 
     patch_virtual_queue_for_local_execution()
     patch_logging_into_local_execution_log()
