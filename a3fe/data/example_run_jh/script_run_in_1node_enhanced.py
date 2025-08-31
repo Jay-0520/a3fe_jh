@@ -1,7 +1,13 @@
 """
 simple mbar logging and concurrent somd execution in local machine
 
-okay we may not need this ConcurrentSOMDManager class after all, as a3fe already handles concurrent somd jobs quite well.
+This script is enhanced such ways:
+    - improved logging with deduplication of repetitive status messages
+    - parallel MBAR execution with proper logging and dummy output creation if needed
+    - concurrent SOMD execution with MPS support and proper logging
+    - robust error handling and logging for MBAR and SOMD jobs
+
+It has been tested on macOS and HPC with Python 3.10+ as of 2025-08-31 
 """
 import os
 import threading
