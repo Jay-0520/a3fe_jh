@@ -435,8 +435,7 @@ def pick_windows_to_restart(scan_result,
                             restart_if_gap=True,
                             restart_if_inconsistent=True,
                             tol_ns=0.01,
-                            outlier_fraction=0.80,
-                            limit_to_k=None):
+                            outlier_fraction=0.80):
     """
     Choose λ-windows to restart based on gaps/inconsistency/short-outliers.
     Returns [(leg, stage, lam, reason_dict), ...]
@@ -464,14 +463,13 @@ def pick_windows_to_restart(scan_result,
         if reason:
             picks.append((leg, stage, lam, reason))
 
-    if isinstance(limit_to_k, int) and limit_to_k > 0 and len(picks) > limit_to_k:
-        def _sev(item):
-            _leg, _stage, _lam, r = item
-            rng = scan_result[(_leg, _stage, _lam)]["range"]
-            gap = 1 if "gap" in r else 0
-            outl = 1 if "short_outlier" in r else 0
-            return (rng, gap, outl)
-        picks = sorted(picks, key=_sev, reverse=True)[:limit_to_k]
+    def _sev(item):
+        _leg, _stage, _lam, r = item
+        rng = scan_result[(_leg, _stage, _lam)]["range"]
+        gap = 1 if "gap" in r else 0
+        outl = 1 if "short_outlier" in r else 0
+        return (rng, gap, outl)
+    picks = sorted(picks, key=_sev, reverse=True)
 
     return picks
 
@@ -490,8 +488,8 @@ def fix_simulation_times(
     restart_if_inconsistent=True,
     inconsistency_tol_ns=0.01,
     outlier_fraction=0.80,
-    limit_restart_to_k=None,
     delete_simfile_on_restart=True,
+    delete_gradientfile_on_restart=True,  # whether to delete simfile.dat on restart
     extra_ckpt_patterns=None,
     dry_run=False,
 ):
@@ -513,7 +511,6 @@ def fix_simulation_times(
         restart_if_inconsistent=restart_if_inconsistent,
         tol_ns=inconsistency_tol_ns,
         outlier_fraction=outlier_fraction,
-        limit_to_k=limit_restart_to_k,
     )
 
     if picks:
@@ -540,11 +537,12 @@ def fix_simulation_times(
                     stage=stage,
                     lam=lam,
                     delete_simfile=delete_simfile_on_restart,
+                    delete_gradients_dat=delete_gradientfile_on_restart,
                     extra_patterns=extra_ckpt_patterns,
                 )
 
     # 3) Truncation pass
-    if apply_truncation:
+    if apply_truncation and not apply_auto_restart:
         logger.info("Starting simulation time fixing process (truncate pass)...")
         truncate_simulations_to_minimum(calc, detect_gaps=detect_gaps)
 
