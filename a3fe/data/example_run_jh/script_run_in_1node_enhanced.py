@@ -47,6 +47,7 @@ FAST_UPDATE_INTERVAL = 3  # seconds between updates for local execution
 SKIP_ADAPTIVE_EFFICIENCY = False  # Set to True to skip adaptive efficiency checks
 ENABLE_MPS = True  # Enable NVIDIA MPS for GPU jobs on HPC (DRAC)
 MAX_CONCURRENT_SOMD = 2  # only 2 concurrent somd jobs per GPU to avoid oversubscription
+MPS_THREAD_PERCENTAGE=None 
 
 # ==================================================
 # LOGGING SETUP FOR LOCAL EXECUTION
@@ -703,7 +704,7 @@ class ParallelMBARManager:
 class ConcurrentSOMDManager:
     """Manages concurrent SOMD executions with MPS support and with proper synchronization."""
     
-    def __init__(self, max_workers=2, enable_mps=True):
+    def __init__(self, max_workers=2, enable_mps=True, mps_thread_percent: int | None = None):
         self.max_workers = max_workers
         self.enable_mps = enable_mps
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
@@ -711,6 +712,7 @@ class ConcurrentSOMDManager:
         self.job_metadata = {}  # job_id -> metadata
         self.job_counter = itertools.count(800000)  # Different range from MBAR
         self.mps_enabled = False
+        self.mps_thread_percent = mps_thread_percent
         self.logger = get_tagged_logger(__name__ + ".SOMD_MANAGER")
 
         # Synchronization tracking
@@ -730,10 +732,10 @@ class ConcurrentSOMDManager:
                                   capture_output=True, text=True)
             if result.returncode == 0:
                 self.mps_enabled = True
-                # Set thread percentage for optimal sharing
-                percentage = max(10, 100 // self.max_workers)
-                os.environ['CUDA_MPS_ACTIVE_THREAD_PERCENTAGE'] = str(percentage)
-                self.logger.info(f"MPS enabled with {percentage}% thread allocation per process")
+                if self.mps_thread_percent is None:
+                    self.logger.info("MPS enabled; no per-client thread cap (default scheduler).")
+                else:
+                    self.logger.info(f"MPS enabled; will cap each client at {self.mps_thread_percent}% active threads.")
             else:
                 self.logger.warning("Failed to enable MPS - running without concurrent GPU sharing")
         except FileNotFoundError:
@@ -791,6 +793,12 @@ class ConcurrentSOMDManager:
         env.setdefault("OMP_NUM_THREADS", "1")
         env.setdefault("MKL_NUM_THREADS", "1")
         env.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+        if self.mps_enabled and self.mps_thread_percent is not None:
+            # percentage = max(10, 100 // self.max_workers)
+            # os.environ['CUDA_MPS_ACTIVE_THREAD_PERCENTAGE'] = str(percentage)
+            env["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = str(int(self.mps_thread_percent))
+
 
         real_cwd = cwd or os.path.dirname(script_path)
 
@@ -1109,7 +1117,8 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
     # Initialize global SOMD manager for concurrent execution
     _GLOBAL_SOMD_MANAGER = ConcurrentSOMDManager(
         max_workers=MAX_CONCURRENT_SOMD,
-        enable_mps=ENABLE_MPS
+        enable_mps=ENABLE_MPS,
+        mps_thread_percent=MPS_THREAD_PERCENTAGE,
     )
     logger.info(f"Concurrent SOMD workers: {_GLOBAL_SOMD_MANAGER.max_workers}, MPS enabled: {_GLOBAL_SOMD_MANAGER.mps_enabled}")
 
@@ -1779,6 +1788,8 @@ if __name__ == "__main__":
     # Configure via environment variables
     FORCE_LOCAL_EXECUTION = True
     FORCE_CPU_PLATFORM = True
+    ENABLE_MPS=True
+    MAX_CONCURRENT_SOMD=5
     # SKIP_ADAPTIVE_EFFICIENCY = True  # skip the adaptive efficiency optimization loop
 
     patch_virtual_queue_for_local_execution()
