@@ -83,7 +83,7 @@ def delete_checkpoints_for_lambda(calc, *, leg, stage, lam,
         return False
 
     _, _, win = found
-    patterns = ["*.s3"] # catches SYSTEM.s3, gradients.s3, sim_restart.s3, etc.
+    patterns = ["*.s3", "*.s3.previous"] # catches SYSTEM.s3, gradients.s3, sim_restart.s3, etc.
     if extra_patterns:
         patterns.extend(extra_patterns)
 

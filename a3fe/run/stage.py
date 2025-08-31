@@ -193,6 +193,7 @@ class Stage(_SimulationRunner):
             # Point self._sub_sim_runners at the lambda windows
             self._sub_sim_runners = self.lam_windows
 
+
             # Save the state and update log
             self._update_log()
             self._dump()
