@@ -1331,8 +1331,6 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
                         jobs_to_remove.append(job)
                         logger.warning(f"[CONCURRENT UPDATE] ❌ SOMD job failed! Job_ID: {job.slurm_job_id}, {job_sim_info}")
                 elif status == "RUNNING":
-                    if job.status != _JobStatus.RUNNING:
-                        job.status = _JobStatus.RUNNING
                     if not hasattr(job, "_logged_running"):
                         logger.info(
                             f"[CONCURRENT UPDATE] SOMD job running...Job_ID: {job.slurm_job_id}, {job_sim_info}"
@@ -1365,8 +1363,6 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
                         )
                 elif status == "RUNNING":
                     # Keep job in queue, mark as running if not already done
-                    if job.status != _JobStatus.RUNNING:
-                        job.status = _JobStatus.RUNNING
                     if not hasattr(job, "_logged_running"):
                         logger.info(
                             f"[LOCAL UPDATE] 🟡 MBAR job {job.slurm_job_id} running, {job_sim_info}"
@@ -1564,7 +1560,7 @@ def patch_shorter_runtime_when_resuming(new_runtime=0.0):
             # Run initial SOMD simulations
             for win in self.lam_windows:
                 win.run(run_nos=run_nos, runtime=runtime)
-                win._update_log()
+                # win._update_log()
                 self._dump()
 
             try:
