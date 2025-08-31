@@ -1,3 +1,7 @@
+"""
+This is very messy but support the following features:
+
+"""
 import os
 import glob
 import json
@@ -62,9 +66,15 @@ def _replace_step(line: str, new_step: int) -> str:
 # =========================
 def delete_checkpoints_for_lambda(calc, *, leg, stage, lam,
                                   delete_simfile=True,
+                                  delete_gradients_dat=True,
                                   extra_patterns=None):
     """
-    Minimal reset: delete *.s3 (and optionally simfile.dat) for the specified λ-window.
+    Minimal reset for a single λ-window:
+      - delete *.s3 (SYSTEM/gradients/sim_restart, etc.)
+      - optionally delete simfile.dat and gradients.dat so fresh files are written
+
+    NOTE: This function does NOT modify/trim gradients.dat; use backup+reset below
+          if you want a safe copy first.
     """
     logger = calc._logger
     found = _find_window(calc, leg, stage, lam)
@@ -73,7 +83,7 @@ def delete_checkpoints_for_lambda(calc, *, leg, stage, lam,
         return False
 
     _, _, win = found
-    patterns = ["*.s3"]
+    patterns = ["*.s3"] # catches SYSTEM.s3, gradients.s3, sim_restart.s3, etc.
     if extra_patterns:
         patterns.extend(extra_patterns)
 
@@ -101,6 +111,17 @@ def delete_checkpoints_for_lambda(calc, *, leg, stage, lam,
                 except Exception as e:
                     ok = False
                     logger.warning(f"[reset] could not remove {simfile}: {e}")
+
+        # optionally drop gradients.dat (we do NOT edit it elsewhere)
+        if delete_gradients_dat:
+            fp = run_dir / "gradients.dat"
+            if fp.exists():
+                try:
+                    fp.unlink()
+                    logger.info(f"[reset] removed {fp}")
+                except Exception as e:
+                    ok = False
+                    logger.warning(f"[reset] could not remove {fp}: {e}")
 
     return ok
 
