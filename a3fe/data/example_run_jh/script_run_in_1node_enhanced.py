@@ -52,7 +52,7 @@ FAST_UPDATE_INTERVAL = 3  # seconds between updates for local execution
 SKIP_ADAPTIVE_EFFICIENCY = False  # Set to True to skip adaptive efficiency checks
 ENABLE_MPS = True  # Enable NVIDIA MPS for GPU jobs on HPC (DRAC)
 MAX_CONCURRENT_SOMD = 4  # only 2 concurrent somd jobs per GPU to avoid oversubscription
-MPS_THREAD_PERCENTAGE=None 
+MPS_THREAD_PERCENTAGE = None 
 
 # ==================================================
 # LOGGING SETUP FOR LOCAL EXECUTION
