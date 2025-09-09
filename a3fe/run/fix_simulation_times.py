@@ -488,8 +488,8 @@ def fix_simulation_times(
     restart_if_inconsistent=True,
     inconsistency_tol_ns=0.01,
     outlier_fraction=0.80,
-    delete_simfile_on_restart=True,
-    delete_gradientfile_on_restart=True,  # whether to delete simfile.dat on restart
+    delete_simfile_on_restart=True,       # whether to delete simfile.dat on restart
+    delete_gradientfile_on_restart=True,  # whether to delete gradients.dat on restart
     extra_ckpt_patterns=None,
     dry_run=False,
 ):
