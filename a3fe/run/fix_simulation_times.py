@@ -25,20 +25,21 @@ import numpy as np
 
 
 def setup_logging(calc_dir: str) -> logging.Logger:
-    """Setup logging for the cleanup process."""
     log_file = Path(calc_dir) / f"simulation_cleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    
+
+    # force=True ensures we reconfigure even if something configured logging earlier
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[logging.FileHandler(log_file, encoding="utf-8"), logging.StreamHandler()],
+        force=True,
     )
-    
+
     logger = logging.getLogger(__name__)
-    logger.info(f"Starting simulation cleanup process")
+    logger.setLevel(logging.INFO)  # <-- important: allow INFO to pass
+    logger.propagate = True        # (default True; keep it explicit)
+
+    logger.info("Starting simulation cleanup process")
     logger.info(f"Log file: {log_file}")
     return logger
 
