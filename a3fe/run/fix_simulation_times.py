@@ -21,6 +21,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 import logging
+import numpy as np
 
 
 def setup_logging(calc_dir: str) -> logging.Logger:
