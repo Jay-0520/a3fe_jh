@@ -179,7 +179,8 @@ def analyze_window_times(calc, logger: logging.Logger) -> Dict[Tuple[str, str, f
                     if gap_count > 0 or range_time > 0.01:  # 0.01 ns threshold
                         logger.warning(f"{leg_name}/{stage_name} λ={lam:.3f}: "
                                      f"times={np.round(sim_times, 6)} ns, "
-                                     f"range={range_time:.4f} ns, "
+                                     f"gap_details={details_list}, "
+                                    #  f"range={range_time:.4f} ns, "
                                      f"gaps={gap_count}/{len(sim_times)}")
                     else:
                         logger.debug(f"{leg_name}/{stage_name} λ={lam:.3f}: ✅ consistent at {min_time:.6f} ns")
