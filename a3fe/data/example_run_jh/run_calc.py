@@ -1,15 +1,9 @@
 """
-Version: v4.0
-This script is enhanced such ways:
-    - improved logging with deduplication of repetitive status messages
-    - parallel MBAR execution with proper logging and dummy output creation if needed
-    - concurrent SOMD execution
-    - robust error handling and logging for MBAR and SOMD jobs
+This script is exactly the same as script_run_in_1node.py except for the MBAR logging
 
-It has been tested on macOS and HPC with Python 3.10+ as of 2025-08-31 
+MBAR logging in this script is simple and has been tested (as of 2025-08-23) to work correctly in local execution mode. 
 """
 import os
-import threading
 
 os.environ["MPLBACKEND"] = "Agg"  # prevents macOS GUI backend from opening windows
 try:
@@ -41,8 +35,6 @@ import subprocess
 from tqdm import tqdm
 import sys
 import shlex
-from collections import defaultdict
-from decimal import Decimal
 from a3fe.run.fix_simulation_times import fix_simulation_times
 
 # Configuration options
@@ -50,7 +42,7 @@ FORCE_LOCAL_EXECUTION = True  # Set to False for normal SLURM execution
 FORCE_CPU_PLATFORM = False  # Set to True to force CPU even on GPU systems
 FAST_UPDATE_INTERVAL = 3  # seconds between updates for local execution
 SKIP_ADAPTIVE_EFFICIENCY = False  # Set to True to skip adaptive efficiency checks
-MAX_CONCURRENT_SOMD = 4  # only 2 concurrent somd jobs per GPU to avoid oversubscription
+
 
 # ==================================================
 # LOGGING SETUP FOR LOCAL EXECUTION
@@ -69,21 +61,8 @@ class ColorFormatter(logging.Formatter):
     }
 
     def format(self, record):
-        if not hasattr(record, "tag"):
-            record.tag = ""
         fmt = self.FORMATS.get(record.levelno, "%(levelname)s: %(message)s")
-        return logging.Formatter(fmt=fmt, datefmt="%Y-%m-%d %H:%M:%S").format(record)
-
-
-def get_tagged_logger(name: str, tag: str | None = None) -> logging.LoggerAdapter:
-    """
-    Return a LoggerAdapter that injects a tag into log records
-    and *does not* attach its own handlers (so it uses the root handler/format).
-    """
-    base = logging.getLogger(name)
-    base.propagate = True
-    # Do not add handlers here; rely on root configured in setup_global_logging()
-    return logging.LoggerAdapter(base, extra={"tag": f"[{tag}] " if tag else ""})
+        return logging.Formatter(fmt).format(record)
 
 
 class DedupStatusFilter(logging.Filter):
@@ -286,16 +265,14 @@ def add_filter_recursively(obj, filter_instance=shared_filter):
 # ==================================================
 # UTILITY FUNCTIONS FOR LOCAL EXECUTION
 # ==================================================
-def _parse_sim_info_from_job(job: Job) -> str:
+def _parse_sim_info_from_job(job) -> str:
     """
     Job.command_list is like:
       ['--chdir', '/Users/jingjinghuang/Documents/fep_workflow/
         test_somd_run_again2_copy1/bound/vanish/output/lambda_0.000/run_01',
         '/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_again2_copy1/
         bound/vanish/output/lambda_0.000/run_01/run_somd.sh', '0.0']
-    Returns a string like: "leg=<leg>, stage=<stage>, lam=<lam>, run_no=<run_no>"
     """
-    leg_type = "?"
     stage = "?"
     lam = "?"
     run_no = "?"
@@ -303,8 +280,8 @@ def _parse_sim_info_from_job(job: Job) -> str:
     # Lambda is last element if numeric
     try:
         potential_lam = job.command_list[-1]
-        # must use string to get logging like this "lam=0.000" and not "lam=0.0"
-        lam = f"{Decimal(str(potential_lam)):.3f}"
+        float(potential_lam)
+        lam = potential_lam
     except Exception:
         pass
 
@@ -316,53 +293,37 @@ def _parse_sim_info_from_job(job: Job) -> str:
             cwd = job.command_list[idx + 1]
 
     if isinstance(cwd, str):
-        m_leg_stage = re.search(r"[\\/](bound|free)[\\/](.*?)[\\/]output[\\/]", cwd)
-        if m_leg_stage:
-            leg_type = m_leg_stage.group(1)
-            stage = m_leg_stage.group(2)
+        # stage: e.g., .../bound/vanish/output/...
+        m_stage = re.search(r"/(?:bound|free)/([^/]+)/output/", cwd)
+        if m_stage:
+            stage = m_stage.group(1)
 
         # run number: e.g., .../run_01
         m_run = re.search(r"run_(\d+)", cwd)
         if m_run:
             run_no = m_run.group(1)
 
-    return f"leg={leg_type}, stage={stage}, lam={lam}, run_no={run_no}"
+    return f"stage={stage}, lam={lam}, run_no={run_no}"
 
-# TODO: we may need to consolidate the two functions below
+
 def _format_sim_info(cwd: str, lam_arg: str = None) -> str:
     """
     Given a working directory (the --chdir path), an optional lambda string,
     and an optional restraint type, returns:
-       "leg=<leg>, stage=<stage>, lam=<lam>, run_no=<run_no>"
+       "stage=<stage>, lam=<lam>, run_no=<run_no>[, restraint=<type>]"
     """
-    # parse lambda from argument or from cwd
+    # parse lam from argument or from cwd
     if lam_arg is None:
         m_lam = re.search(r"/lambda_([0-9.]+)/", cwd)
         lam_arg = m_lam.group(1) if m_lam else "?"
-
-    # parse leg (bound/free)
-    m_leg = re.search(r"/(bound|free)/", cwd)
-    leg = m_leg.group(1) if m_leg else "?"
-
-    # parse stage (vanish, restrain, discharge, etc.)
+    # parse stage
     m_stage = re.search(r"/(?:bound|free)/([^/]+)/output/", cwd)
     stage = m_stage.group(1) if m_stage else "?"
-
     # parse run number
     m_run = re.search(r"/run_(\d+)", cwd)
     run_no = m_run.group(1) if m_run else "?"
-
-    # build parts
-    parts = [f"leg={leg}", f"stage={stage}", f"lam={lam_arg}", f"run_no={run_no}"]
+    parts = [f"stage={stage}", f"lam={lam_arg}", f"run_no={run_no}"]
     return ", ".join(parts)
-
-
-def _parse_leg_stage_from_cwd(cwd: str) -> tuple[str | None, str | None]:
-    m_leg = re.search(r"/(bound|free)/", cwd)
-    m_stage = re.search(r"/(?:bound|free)/([^/]+)/output/", cwd)
-    leg = m_leg.group(1).lower() if m_leg else None
-    stage = m_stage.group(1).lower() if m_stage else None
-    return leg, stage
 
 
 def _mbar_worker(cwd: str, mbar_command: str) -> tuple[int, str, str, float]:
@@ -487,10 +448,10 @@ def _extract_mbar_output_file(command: str) -> str | None:
     return os.path.basename(output_value) if output_value else None
 
 
-# ========================================================
+# ==================================================
 # Global MBAR Manager FOR LOCAL AND PARALLEL EXECUTION
-# ========================================================
-class ParallelMBARManager:
+# ==================================================
+class GlobalMBARManager:
     """Global manager for parallel MBAR execution with proper synchronization."""
 
     def __init__(self, max_workers: int = None, use_progress: bool = True):
@@ -505,8 +466,7 @@ class ParallelMBARManager:
         self.job_metadata = {}  # job_id -> {"cwd": str, "cmd": str, "script": str}
         self.job_counter = itertools.count(600000)
         self.expected_outputs = set()
-        self.logger = get_tagged_logger(__name__ + ".MBAR_MANAGER")
-        self.jobs_by_leg_stage = {} 
+        self.logger = logging.getLogger(__name__ + ".MBAR_MANAGER")
 
     def submit_mbar_job(self, script_path: str, cwd: str) -> int:
         """Submit an MBAR job for parallel execution."""
@@ -640,7 +600,7 @@ class ParallelMBARManager:
             ofile = _extract_mbar_output_file(cmd)
             success = False
             if ofile is None:
-                self.logger.error(f"MBAR job {job_id} did not produce an output file with run command: {cmd}")
+                self.logger.error(f"MBAR job {job_id} did not produce an output file")
                 rc = -1
             else:
                 # when ofile is not None
@@ -658,7 +618,7 @@ class ParallelMBARManager:
                     fail += 1
                     error_msg = stderr if stderr else "Output file missing or empty"
                     if not use_pb:
-                        self.logger.warning(f"MBAR job {job_id} failed: {error_msg} with run command: {cmd}")
+                        self.logger.warning(f"MBAR job {job_id} failed: {error_msg}")
 
             self._log_mbar_completion(
                 cwd=cwd,
@@ -701,330 +661,8 @@ class ParallelMBARManager:
             return "RUNNING"
 
 
-# ========================================================
-# Global SOMD Manager FOR LOCAL AND CONCURRENT EXECUTION
-# ========================================================
-class ConcurrentSOMDManager:
-    """Manages concurrent SOMD executions with proper synchronization.
-    
-    TODO: it seems NVIDIA MPS + OpenMM/SOMD is a bit brittle. likely lead to "CUDA_ERROR_NOT_FOUND (500)"
-    OpenMM compiles CUDA kernels at runtime. And with MPS, multiple client processes can JIT the same 
-    kernels concurrently -> errors. so we remove MPS completely for now.
-    """
-    
-    def __init__(self, max_workers=2):
-        self.max_workers = max_workers
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-        self.futures = {}  # job_id -> Future
-        self.job_metadata = {}  # job_id -> metadata
-        self.job_counter = itertools.count(800000)  # Different range from MBAR
-        self.logger = get_tagged_logger(__name__ + ".SOMD_MANAGER")
-
-        # Enhanced synchronization tracking
-        self.stage_lock = threading.Lock()
-        self.gpu_semaphore = threading.Semaphore(max_workers) # not sure about this actually by JH 2025-09-24
-        self.jobs_by_stage = defaultdict(set)
-        self.completed_jobs = set() 
-   
-    def submit_somd_job(self, script_path: str, lambda_str: str, cwd: str, run_no: int) -> int:
-        """Submit a SOMD job for concurrent execution."""
-        job_id = next(self.job_counter)
-        submit_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        # TODO: we might need to consolidate the two
-        sim_info = _format_sim_info(cwd, lambda_str)
-        leg, stage = _parse_leg_stage_from_cwd(cwd)
-        
-        # Submit to executor
-        future = self.executor.submit(self._run_somd_worker, job_id, script_path, lambda_str, cwd, run_no)
-        self.futures[job_id] = future
-
-        # Store metadata
-        self.job_metadata[job_id] = {
-            'script_path': script_path,
-            'lambda_str': lambda_str,  
-            'lambda_val': float(lambda_str), 
-            'cwd': cwd,
-            'run_no': run_no,
-            'start_time': time.time(),
-            'leg': leg,
-            'stage': stage,
-        }
-        if leg and stage:
-            with self.stage_lock:
-                self.jobs_by_stage[(leg, stage)].add(job_id)
-        
-        self.logger.info(f"[CONCURRENT SOMD] {submit_timestamp} Submitted SOMD job {job_id} for {sim_info}")
-        return job_id
-    
-    def _run_somd_worker(self, job_id:int, script_path: str, lambda_str: str, cwd: str, run_no: int):
-        """Worker function to run a single SOMD simulation."""
-
-        env = os.environ.copy()
-        # prevent BLAS oversubscription when using multiprocessing
-        env.setdefault("OMP_NUM_THREADS", "1")
-        env.setdefault("MKL_NUM_THREADS", "1")
-        env.setdefault("OPENBLAS_NUM_THREADS", "1")
-
-        real_cwd = cwd or os.path.dirname(script_path)
-
-        start_time = time.time()
-        start_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sim_info = _format_sim_info(real_cwd, lambda_str)
-        cfg_path = os.path.join(real_cwd, "somd.cfg")
-        local_execution_log_path = os.path.join(real_cwd, "local_execution.log")
-
-        # we need to validate somd.cfg exists
-        if not os.path.exists(cfg_path) or os.path.getsize(cfg_path) == 0:
-            self.logger.error(f"[CONCURRENT SOMD] ❌ somd.cfg is missing or empty in {real_cwd}")
-            with open(local_execution_log_path, "a") as flog:
-                flog.write(
-                    f"[CONCURRENT SOMD] ❌ JOB {job_id} FAILED {cfg_path} is missing or empty in {real_cwd}; cannot run SOMD\n"
-                )
-            raise RuntimeError(f"somd.cfg is missing or empty in {real_cwd}")
-
-        # Read and parse the SOMD command from script
-        somd_command = None
-        try:
-            with open(script_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if "somd-freenrg" in line:
-                        if line.startswith("srun "):
-                            somd_command = line.split(None, 1)[1]
-                        else:
-                            somd_command = line
-                        break
-        except FileNotFoundError:
-            with open(local_execution_log_path, "a") as flog:
-                flog.write(f"[CONCURRENT SOMD] ❌ JOB {job_id} FAILED missing script {script_path}\n")
-            raise RuntimeError(f"Script not found: {script_path}")
-
-        if not somd_command:
-            raise RuntimeError(f"No somd-freenrg command found in {script_path}")
-
-        # Parse and modify the command
-        parts = somd_command.split()       
-        if "-p" in parts:
-            p_idx = parts.index("-p")
-            if p_idx + 1 < len(parts):
-                current_platform = parts[p_idx + 1].upper()
-                if FORCE_CPU_PLATFORM:
-                    parts[p_idx + 1] = "CPU"
-
-        # Substitute lambda value
-        parts = [tok.replace("$lam", lambda_str).replace("${lam}", lambda_str) for tok in parts]
-                
-        acquired = False
-        try:
-            if self.gpu_semaphore:
-                self.gpu_semaphore.acquire()
-                acquired = True
-        
-            _ = subprocess.run(
-                parts,
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-                text=True,
-            )
-            
-            duration_seconds = time.time() - start_time
-            end_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # Create a local_execution.log file that mimics SLURM output -> must have this
-            with open(local_execution_log_path, "a") as f:
-                f.write(f"[CONCURRENT SOMD] Starting {sim_info} at {start_timestamp}\n")
-                f.write(f"[CONCURRENT SOMD] Completed {sim_info} at {end_timestamp}\n")
-                f.write(f"[CONCURRENT SOMD] Simulation took {duration_seconds:.2f} seconds\n")
-                f.write(f"[CONCURRENT SOMD] ✅ Job {job_id} completed successfully\n")
-
-            self.logger.info(f"[CONCURRENT SOMD] {end_timestamp} ✅ Job {job_id} completed successfully in {duration_seconds:.2f}s: {sim_info}")
-            
-            return 888888  # Success code
-            
-        except Exception as e:
-            rc   = getattr(e, "returncode", -1)
-            err  = getattr(e, "stderr", repr(e))
-
-            end_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self.logger.error(f"[CONCURRENT SOMD] ❌ JOB {job_id} FAILED {rc}")
-            self.logger.error(f"[CONCURRENT SOMD] ❌ STDERR:\n{err}")
-            
-            local_execution_log_path = os.path.join(real_cwd, "local_execution.log")
-            with open(local_execution_log_path, "a") as f:
-                f.write(f"[CONCURRENT SOMD] ❌ Job {job_id} FAILED: {sim_info}\nError: {err}\n")
-            raise
-    
-        finally:
-            if acquired:
-                self.gpu_semaphore.release()
-        
-            with self.stage_lock:
-                    self.completed_jobs.add(job_id)
-                    meta = self.job_metadata.get(job_id, {})
-                    key = (meta.get('leg'), meta.get('stage'))
-                    if key in self.jobs_by_stage:
-                        self.jobs_by_stage[key].discard(job_id)
-    
-    
-    def wait_for_stage(self, leg: str, stage: str):
-        """Block until all SOMD jobs for (leg, stage) have finished."""
-        key = (leg.lower(), stage.lower())
-        # Get snapshot of jobs to wait for
-        with self.stage_lock:
-            pending_ids = list(self.jobs_by_stage.get(key, set()))
-
-        if not pending_ids:
-            self.logger.info(f"[CONCURRENT SOMD] No jobs to wait for stage={stage}, leg={leg}")
-            return
-
-        self.logger.info(f"[CONCURRENT SOMD] 🟡 Waiting for {len(pending_ids)} jobs in stage={stage}, leg={leg}")
-        for job_id in pending_ids:
-            fut = self.futures.get(job_id)
-            if fut is None:
-                continue
-            try:
-                result = fut.result()  # block
-                self.logger.debug(f"[CONCURRENT SOMD] Job {job_id} completed with result: {result}")
-            except Exception as e:
-                self.logger.error(f"[CONCURRENT SOMD] Job {job_id} failed: {e}")
-        
-        # ensure the set is empty (finally blocks remove them)
-        with self.stage_lock:
-            for job_id in pending_ids:
-                self.futures.pop(job_id, None)
-
-        self.logger.info(f"[CONCURRENT SOMD] ✅ All jobs completed for stage={stage}, leg={leg}")
-
-    def check_and_cleanup_completed_jobs(self):
-        """Check for completed jobs and clean them up. Returns count of newly completed."""
-        completed_count = 0
-        jobs_to_remove = []
-        
-        for job_id, future in self.futures.items():
-            if future.done():
-                jobs_to_remove.append(job_id)
-                completed_count += 1
-                # Log completion if not already done
-                if job_id not in self.completed_jobs:
-                    try:
-                        result = future.result()
-                        meta = self.job_metadata.get(job_id, {})
-                        sim_info = meta.get('sim_info', f'job_{job_id}')
-                        self.logger.info(f"[CONCURRENT SOMD] Job {job_id} completed: {sim_info}")
-                    except Exception as e:
-                        self.logger.error(f"[CONCURRENT SOMD] Job {job_id} failed: {e}")
-                    
-                    with self.stage_lock:
-                        self.completed_jobs.add(job_id)
-        
-        # Remove completed jobs
-        for job_id in jobs_to_remove:
-            self.futures.pop(job_id, None)
-        return completed_count
-    
-    def has_pending_jobs(self):
-        """Check if there are pending jobs."""
-        return bool(self.futures)
-    
-    def get_active_job_count(self):
-        """Get number of currently active jobs."""
-        return sum(1 for future in self.futures.values() if not future.done())
-
-    def get_job_status(self, job_id: int) -> str:
-        """Get status of a specific job"""
-        if job_id not in self.futures:
-            if job_id in self.completed_jobs:
-                return "FINISHED"
-            return "UNKNOWN"
-        
-        future = self.futures[job_id]
-        if future.done():
-            try:
-                future.result()
-                return "FINISHED"
-            except:
-                return "FAILED"
-        else:
-            return "RUNNING"
-
-
-
-def patch_stage_for_concurrent_somd():
-    """
-    Patch Stage._run_without_threading to properly integrate with concurrent SOMD execution
-    and ensure stage-level barrier synchronization.
-    """
-    logger = get_tagged_logger(__name__ + ".STAGE_PATCH")
-        
-    def enhanced_run_without_threading(
-        self,
-        run_nos,
-        adaptive=True,
-        runtime=None,
-        max_runtime=60,
-    ):
-        """Enhanced version with proper concurrent SOMD integration."""
-        try:
-            # Reset kill thread flag
-            self.kill_thread = False
-
-            if not adaptive and runtime is None:
-                raise ValueError("If adaptive equilibration detection is disabled, a runtime must be supplied.")
-            if adaptive and runtime is not None:
-                raise ValueError("If adaptive equilibration detection is enabled, a runtime cannot be supplied.")
-
-            if not adaptive:
-                self._logger.info(f"Starting {self}. Adaptive equilibration = {adaptive}...")
-            elif adaptive:
-                self._logger.info(f"Starting {self}. Adaptive equilibration = {adaptive}...")
-                if runtime is None:
-                    runtime = 0.2  # ns (or whatever value you want)
-
-            for win in self.lam_windows:
-                win.run(run_nos=run_nos, runtime=runtime)
-                self._dump()
-
-            # CRITICAL and NEW: Wait for ALL jobs in this stage to complete before proceeding
-            try:
-                leg_name = getattr(self.leg_type, "name", "unknown").lower()
-                stage_name = getattr(self.stage_type, "name", "unknown").lower()
-            except Exception:
-                leg_name = "unknown"
-                stage_name = "unknown"
-
-            if _GLOBAL_SOMD_MANAGER:
-                self._logger.info(
-                    f"[STAGE BARRIER] Waiting for all lambda windows to complete initial runs "
-                    f"before efficiency check (stage={stage_name}, leg={leg_name})"
-                )
-                _GLOBAL_SOMD_MANAGER.wait_for_stage(leg_name, stage_name)
-
-            self.running_wins = self.lam_windows.copy()
-            self._dump()
-
-            if adaptive:
-                self._run_loop_adaptive_efficiency(run_nos=run_nos, max_runtime=max_runtime)
-                self._run_loop_adaptive_equilibration_multiwindow(run_nos=run_nos, max_runtime=max_runtime)
-            else:
-                self._run_loop_non_adaptive()
-
-            self._logger.info(f"All simulations in {self} have finished.")
-
-        except Exception as e:
-            self._logger.exception("")
-            raise e
-    
-    # Apply the patch
-    Stage._run_without_threading = enhanced_run_without_threading
-    logger.info("Stage._run_without_threading patched for concurrent SOMD execution")
-
-
-
 # Global instance
 _GLOBAL_MBAR_MANAGER = None
-_GLOBAL_SOMD_MANAGER = None
 
 
 def _install_mbar_barrier_wrapper(logger):
@@ -1139,12 +777,20 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
 
     turn on use_faster_wait to speed up local testing by reducing wait time
     """
-    global _GLOBAL_MBAR_MANAGER, _GLOBAL_SOMD_MANAGER
+    global _GLOBAL_MBAR_MANAGER
 
     # Check if we should use local execution
     use_local = FORCE_LOCAL_EXECUTION or (shutil.which("squeue") is None)
 
-    logger = get_tagged_logger(__name__ + ".LOCAL_SOMD")
+    # Set up colored logger for this function
+    logger = logging.getLogger(__name__ + ".LOCAL_SOMD")
+    logger.handlers.clear()  # Clear any existing handlers
+    logger.setLevel(logging.INFO)
+    logger.propagate = False  # Don't propagate to avoid duplicate messages
+    handler = logging.StreamHandler()
+    handler.setFormatter(ColorFormatter())
+    handler.addFilter(shared_filter)
+    logger.addHandler(handler)
 
     if not use_local:
         logger.info(
@@ -1152,18 +798,14 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
         )
         return
 
+    # Detect GPU availability
     logger.info(f"Force CPU: {FORCE_CPU_PLATFORM}")
 
     # Initialize global MBAR manager
-    _GLOBAL_MBAR_MANAGER = ParallelMBARManager()
+    _GLOBAL_MBAR_MANAGER = GlobalMBARManager()
+    # APPLY THE MBAR PATCHES HERE
     _install_mbar_barrier_wrapper(logger)
     logger.info(f"MBAR parallel workers: {_GLOBAL_MBAR_MANAGER.max_workers}")
-
-    _GLOBAL_SOMD_MANAGER = ConcurrentSOMDManager(
-        max_workers=MAX_CONCURRENT_SOMD,
-    )
-    logger.info(f"Concurrent SOMD workers: {_GLOBAL_SOMD_MANAGER.max_workers}")
-
 
     # Silence subprocess calls (for ln commands and other system calls)
     original_call = subprocess.call
@@ -1211,10 +853,6 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
         if len(job_command_list) > script_idx + 1:
             lam_arg = job_command_list[-1]  # Lambda value
 
-            # Extract run number from path for synchronization
-            run_match = re.search(r'run_(\d+)', real_cwd)
-            run_no = int(run_match.group(1)) if run_match else 1
-
             # ——— EARLY SKIP if Simulation.log shows FINISHED ———
             sim_log = os.path.join(real_cwd, "Simulation.log")
             exe_log = os.path.join(real_cwd, "local_execution.log")
@@ -1241,14 +879,132 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
                     # Return a fake job ID that will immediately be marked as finished
                     return 999999
 
-            return _GLOBAL_SOMD_MANAGER.submit_somd_job(script_path, lam_arg, cwd, run_no)
+            return _run_somd_locally(script_path, lam_arg, cwd)
         else:
             # Check if this is an MBAR analysis script
             if _is_mbar_script(script_path):
-                return _GLOBAL_MBAR_MANAGER.submit_mbar_job(script_path, real_cwd)
+                return _submit_mbar_parallel(script_path, cwd)
             else:
                 # This is a preparation step
-                return _run_prep_locally(script_path, real_cwd)
+                return _run_prep_locally(script_path, cwd)
+
+    def _run_somd_locally(script_path, lam_arg, cwd) -> int:
+        """Run SOMD simulation locally.
+        note somd.cfg may be easily corrupated by the original a3fe code.
+        """
+        real_cwd = cwd or os.path.dirname(script_path)
+        cfg_path = os.path.join(real_cwd, "somd.cfg")
+
+        if not os.path.exists(cfg_path) or os.path.getsize(cfg_path) == 0:
+            logger.error(
+                f"[LOCAL SOMD] ❌ {cfg_path} is missing or empty in {real_cwd}; cannot run SOMD"
+            )
+            with open(os.path.join(real_cwd, "local_execution.log"), "a") as flog:
+                flog.write(
+                    f"[LOCAL SOMD] ❌ JOB FAILED {cfg_path} is missing or empty in {real_cwd}; cannot run SOMD\n"
+                )
+            raise RuntimeError(
+                f"somd.cfg is missing or empty in {real_cwd}; cannot run SOMD"
+            )
+
+        # Record start time
+        start_time = time.time()
+        start_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        sim_info = _format_sim_info(real_cwd, lam_arg)
+        logger.info(
+            f"[LOCAL SOMD] {start_timestamp} Running {sim_info} in {cwd or os.getcwd()}"
+        )
+
+        # Read the script to find the somd command
+        somd_command = None
+        try:
+            with open(script_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if "somd-freenrg" in line:
+                        # Extract the somd command (remove srun prefix if present)
+                        if line.startswith("srun "):
+                            somd_command = line.split(None, 1)[1]
+                        else:
+                            somd_command = line
+                        break
+        except FileNotFoundError:
+            log_path = os.path.join(real_cwd, "local_execution.log")
+            with open(log_path, "a") as flog:
+                flog.write(f"[LOCAL SOMD] ❌ JOB FAILED missing script {script_path}\n")
+            # now propagate up so you still surface the error
+            raise
+
+        if not somd_command:
+            raise RuntimeError(f"No somd-freenrg command found in {script_path}")
+
+        # Parse and modify the command
+        parts = somd_command.split()
+
+        # Smart platform selection
+        if "-p" in parts:
+            p_idx = parts.index("-p")
+            if p_idx + 1 < len(parts):
+                current_platform = parts[p_idx + 1].upper()
+
+                if FORCE_CPU_PLATFORM:
+                    # Force CPU regardless of hardware
+                    if current_platform != "CPU":
+                        parts[p_idx + 1] = "CPU"
+                        logger.warning("[LOCAL SOMD] Forced platform to CPU")
+                else:
+                    # Keep whatever platform was specified
+                    logger.info(f"[LOCAL SOMD] Using {current_platform} platform")
+
+        # Substitute lambda value
+        parts = [
+            tok.replace("$lam", lam_arg).replace("${lam}", lam_arg) for tok in parts
+        ]
+
+        logger.info(f"[LOCAL SOMD] Executing: {' '.join(parts)} at {real_cwd}")
+
+        try:
+            subprocess.run(
+                parts,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+                text=True,
+            )
+
+            end_time = time.time()
+            end_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            duration_seconds = end_time - start_time
+
+            logger.info(
+                f"[LOCAL SOMD] ✅ {end_timestamp} Completed successfully for {sim_info}"
+            )
+            logger.info(f"[LOCAL SOMD] Simulation took {duration_seconds:.2f} seconds")
+
+            # Create a local_execution.log file that mimics SLURM output
+            local_execution_log_path = os.path.join(real_cwd, "local_execution.log")
+            with open(local_execution_log_path, "a") as f:
+                f.write(f"[LOCAL SOMD] Starting {sim_info} at {start_timestamp}\n")
+                f.write(f"[LOCAL SOMD] Completed {sim_info} at {end_timestamp}\n")
+                f.write(f"Simulation took {duration_seconds:.2f} seconds\n")
+                f.write("✅ Job completed successfully\n")
+            return 888888  # Return fake job ID on success
+
+        except subprocess.CalledProcessError as e:
+            end_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logger.error(f"[LOCAL SOMD] ❌ JOB FAILED with return code {e.returncode}")
+            logger.error(f"[LOCAL SOMD] ❌ STDERR:\n{e.stderr}")
+
+            # --- write a “failed” marker into the same execution log ---
+            local_execution_log_path = os.path.join(real_cwd, "local_execution.log")
+            with open(local_execution_log_path, "a") as f:
+                f.write(
+                    f"[LOCAL SOMD] {end_timestamp} ❌ JOB FAILED with return code {e.returncode}\n"
+                )
+                f.write(f"[LOCAL SOMD] ❌ STDERR: {e.stderr}\n")
+
+            raise RuntimeError(f"SOMD simulation failed: {e}")
 
     def _run_prep_locally(script_path, cwd) -> int:
         """Run preparation step locally."""
@@ -1275,6 +1031,80 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
         except subprocess.CalledProcessError as e:
             logger.error(f"[LOCAL PREP] ❌ Failed with return code {e.returncode}")
             raise RuntimeError(f"Preparation step failed: {e}")
+
+    def _run_mbar_locally(self, script_path, cwd) -> int:
+        """Submit MBAR to the process pool and return a fake job id immediately.
+        This function runs mbar calc one-by-one, which is very slow so depreacted.
+        """
+        logger.info(f"[LOCAL MBAR] Queuing MBAR analysis in {cwd or os.getcwd()}")
+
+        try:
+            with open(script_path) as f:
+                script_content = f.read()
+        except FileNotFoundError:
+            raise RuntimeError(f"MBAR script not found: {script_path}")
+
+        # Find the MBAR command
+        mbar_command = None
+        for line in script_content.splitlines():
+            line = line.strip()
+            if (
+                ("analyse_freenrg" in line)
+                and not line.startswith("#")
+                and not line.startswith("export")
+            ):
+                mbar_command = line
+                break
+
+        if not mbar_command:
+            logger.warning(
+                "[LOCAL MBAR] No MBAR command found, trying to run script directly"
+            )
+            mbar_command = f"bash {script_path}"
+
+        logger.info(f"[LOCAL MBAR] Executing MBAR command: {mbar_command}")
+
+        try:
+            subprocess.run(
+                mbar_command,
+                shell=True,
+                cwd=cwd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            logger.info("[LOCAL MBAR] ✅ MBAR analysis completed successfully")
+            return 666666  # Return fake job ID
+
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                f"[LOCAL MBAR] ❌ MBAR analysis failed with return code {e.returncode}"
+            )
+            logger.error(f"[LOCAL MBAR] ❌ STDERR: {e.stderr}")
+
+            # MBAR often fails during early adaptive phases due to insufficient data
+            logger.warning(
+                "[LOCAL MBAR] ⚠️ MBAR failure is common during early adaptive phases"
+            )
+            logger.warning(
+                "[LOCAL MBAR] ⚠️ Creating dummy output file to allow simulation to continue"
+            )
+
+            # Create a realistic dummy output file that matches the expected MBAR format
+            dummy_output = _extract_mbar_output_file(mbar_command)
+            if dummy_output:
+                dummy_path = os.path.join(cwd, dummy_output)
+                _create_dummy_mbar_output(dummy_path, cwd)
+                logger.warning(
+                    f"[LOCAL MBAR] Created dummy MBAR output file: {dummy_path}"
+                )
+
+            return 666666  # Return success to continue execution
+
+    def _submit_mbar_parallel(script_path, cwd) -> int:
+        """Submit MBAR job to global manager for parallel execution."""
+        return _GLOBAL_MBAR_MANAGER.submit_mbar_job(script_path, cwd)
 
     def timing_based_get_tot_gpu_time(self) -> float:
         """need to get tot_gpu_time to set relative_simulation_cost which is
@@ -1352,32 +1182,8 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
                 # not yet assigned, skip this cycle
                 continue
 
-            # Handle concurrent SOMD jobs - check status in global manager
-            if job.slurm_job_id >= 800000 and job.slurm_job_id < 900000:  # Concurrent SOMD job IDs start at 800000
-                status = _GLOBAL_SOMD_MANAGER.get_job_status(job.slurm_job_id)
-                if status == "FINISHED":
-                    if not getattr(job, "_already_marked_finished", False):
-                        job.status = _JobStatus.FINISHED
-                        job._already_marked_finished = True
-                        jobs_to_remove.append(job)
-                        logger.info(f"[CONCURRENT UPDATE] ✅ SOMD job finished! Job_ID: {job.slurm_job_id}, {job_sim_info}")
-                elif status == "FAILED":
-                    if not getattr(job, "_already_marked_finished", False):
-                        job.status = _JobStatus.FAILED
-                        job._already_marked_finished = True
-                        jobs_to_remove.append(job)
-                        logger.warning(f"[CONCURRENT UPDATE] ❌ SOMD job failed! Job_ID: {job.slurm_job_id}, {job_sim_info}")
-                elif status == "RUNNING":
-                    if not hasattr(job, "_logged_running"):
-                        logger.info(
-                            f"[CONCURRENT UPDATE] Running SOMD Job_ID: {job.slurm_job_id}, {job_sim_info}"
-                        )
-                        job._logged_running = True
-
-                continue
-
             # Handle MBAR jobs - check status in global manager
-            if job.slurm_job_id >= 600000 and job.slurm_job_id < 800000:  # MBAR job IDs start at 600000
+            if job.slurm_job_id >= 600000:  # MBAR job IDs start at 600000
                 status = _GLOBAL_MBAR_MANAGER.get_job_status(job.slurm_job_id)
 
                 if status == "FINISHED":
@@ -1472,9 +1278,6 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
     Job.has_failed = local_has_failed
 
     VirtualQueue.submit = quiet_submit
-    
-    # Apply the stage patch for concurrent SOMD
-    patch_stage_for_concurrent_somd()
 
     if use_faster_wait:
         # Patch the wait method to use faster polling for local execution
@@ -1550,7 +1353,7 @@ def patch_logging_into_local_execution_log():
     logger.info("Patched some logging into local_execution.log for clearer output")
 
 
-def patch_shorter_runtime_when_resuming(new_runtime=0.0):
+def patch_shorter_runtime_when_resuming(new_runtime=0.1):
     """
     Directly patch the hardcoded runtime=0.2 to runtime=0.1 in Stage._run_without_threading
 
@@ -1600,24 +1403,8 @@ def patch_shorter_runtime_when_resuming(new_runtime=0.0):
             # Run initial SOMD simulations
             for win in self.lam_windows:
                 win.run(run_nos=run_nos, runtime=runtime)
-                # win._update_log()
+                win._update_log()
                 self._dump()
-
-            try:
-                leg_name = getattr(self.leg_type, "name", "bound").lower()
-            except Exception:
-                raise
-            try:
-                stage_name = getattr(self.stage_type, "name", "vanish").lower()
-            except Exception:
-                raise
-
-            if _GLOBAL_SOMD_MANAGER:
-                self._logger.info(
-                    f"[STAGE BARRIER] Waiting for all lambda windows to complete initial runs "
-                    f"before efficiency check (stage={stage_name}, leg={leg_name})"
-                )
-                _GLOBAL_SOMD_MANAGER.wait_for_stage(leg_name, stage_name)
 
             # Periodically check the simulations and analyse/ resubmit as necessary
             # Copy to ensure that we don't modify self.lam_windows when updating self.running_wins
@@ -1825,29 +1612,23 @@ def _debug_patch_force_not_equilibrated():
     )
 
 
+
 if __name__ == "__main__":
-    from a3fe.run.enums import LegType as _LegType
     # Set up global logging first
     setup_global_logging()
 
     # Configure via environment variables
     FORCE_LOCAL_EXECUTION = True
-    FORCE_CPU_PLATFORM = True
-    MAX_CONCURRENT_SOMD=5  # It seems we should set this to 5 in HPC
+    FORCE_CPU_PLATFORM = False 
+   
 
     patch_virtual_queue_for_local_execution()
-    patch_logging_into_local_execution_log()
+    patch_logging_into_local_execution_log() 
+    
+    sysprep_cfg = SystemPreparationConfig(slurm=True) # use default settings
 
-    # _debug_patch_stage_skip_adaptive_efficiency()
-    # _debug_patch_force_not_equilibrated()
-    a3.Calculation.required_legs = [_LegType.BOUND]
-    sysprep_cfg = SystemPreparationConfig(slurm=True)  # use default settings
-
-    calc = a3.Calculation(
-        base_dir="/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_again2",
-        input_dir="/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_again2/input",
-        ensemble_size=3,
-    )
+    calc = a3.Calculation(base_dir="/home/jjhuang/scratch/jjhuang/fep_workflows/small_test/system_11",
+                         input_dir="/home/jjhuang/scratch/jjhuang/fep_workflows/small_test/system_11/input")
 
     calc.setup(
         bound_leg_sysprep_config=sysprep_cfg,
@@ -1857,11 +1638,9 @@ if __name__ == "__main__":
     add_filter_recursively(calc)
 
     calc.get_optimal_lam_vals()
-    calc.run(adaptive=True,
-             parallel=False)              # run things sequentially
+    calc.run(adaptive=True, 
+             parallel=True)              # run things sequentially
 
     calc.wait()
     calc.analyse()
     calc.save()
-
-
