@@ -51,6 +51,7 @@ FORCE_CPU_PLATFORM = False  # Set to True to force CPU even on GPU systems
 FAST_UPDATE_INTERVAL = 3  # seconds between updates for local execution
 SKIP_ADAPTIVE_EFFICIENCY = False  # Set to True to skip adaptive efficiency checks
 MAX_CONCURRENT_SOMD = 4  # only 2 concurrent somd jobs per GPU to avoid oversubscription
+A3FE_STILL_RUNNING_THROTTLE_SEC = 600  # 10 minutes; set to 0 to disable throttling
 
 # ==================================================
 # LOGGING SETUP FOR LOCAL EXECUTION
@@ -108,6 +109,10 @@ class DedupStatusFilter(logging.Filter):
 
     def __init__(self, debug_mode: bool = False):
         super().__init__()
+        self.heartbeat_interval_sec = A3FE_STILL_RUNNING_THROTTLE_SEC
+        self._last_heartbeat_by_job: dict[str, float] = {}
+        self.suppress_still_running: bool = (self.heartbeat_interval_sec == 0)
+
         self.debug_mode = debug_mode
         self.suppress_mbar_noise: bool = False
         self._mbar_noise = re.compile(
@@ -126,6 +131,17 @@ class DedupStatusFilter(logging.Filter):
 
         if self.debug_mode:
             print(f"[LOCAL DEBUG]: Processing message from {name}: {msg[:100]}...")
+
+        if "Still running" in msg:
+            if self.suppress_still_running:
+                return False
+            job_key = self._get_job_key(msg, name) or "GLOBAL"
+            now = time.time()
+            last = self._last_heartbeat_by_job.get(job_key, 0.0)
+            if now - last < self.heartbeat_interval_sec:
+                return False  # too soon; drop
+            self._last_heartbeat_by_job[job_key] = now
+            return True
 
         # For "Not running" messages, try to identify which job this is about
         if "Not running" in msg:
@@ -178,6 +194,7 @@ class DedupStatusFilter(logging.Filter):
                     "JobStatus.KILLED",
                 ]:
                     self._not_running_jobs.discard(unique_job_key)
+                    self._last_heartbeat_by_job.pop(unique_job_key, None)
                     if self.debug_mode:
                         print(
                             f"[LOCAL DEBUG]: Job {unique_job_key} finished, allowing future 'Not running'"
@@ -710,6 +727,7 @@ class ConcurrentSOMDManager:
     TODO: it seems NVIDIA MPS + OpenMM/SOMD is a bit brittle. likely lead to "CUDA_ERROR_NOT_FOUND (500)"
     OpenMM compiles CUDA kernels at runtime. And with MPS, multiple client processes can JIT the same 
     kernels concurrently -> errors. so we remove MPS completely for now.
+    NOTE: however, MPS seems to improve the concurrent performance
     """
     
     def __init__(self, max_workers=2):
@@ -1832,7 +1850,7 @@ if __name__ == "__main__":
 
     # Configure via environment variables
     FORCE_LOCAL_EXECUTION = True
-    FORCE_CPU_PLATFORM = True
+    FORCE_CPU_PLATFORM = False
     MAX_CONCURRENT_SOMD=5  # It seems we should set this to 5 in HPC
 
     patch_virtual_queue_for_local_execution()
