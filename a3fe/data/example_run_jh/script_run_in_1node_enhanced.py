@@ -1293,7 +1293,123 @@ def _install_soft_trim_time_series_wrapper(logger):
         return overall_dgs, overall_times
 
     process_grads.get_time_series_multiwindow_mbar = _gts_mbar_soft_trim
-    logger.info("[SOFT-TRIM] Installed per-run total-time soft-trim for MBAR time series.")
+    logger.info("[SOFT-TRIM] Installed soft-trim wrapper for get_time_series_multiwindow_mbar().")
+
+
+def _install_soft_trim_time_series_wrapper_for_ti(logger):
+    import a3fe.analyse.process_grads as process_grads
+    import numpy as _np
+
+    if hasattr(process_grads, "_orig_gts_ti"):
+        return  # already patched
+
+    process_grads._orig_gts_ti = process_grads.get_time_series_multiwindow
+
+    def _gts_ti_soft_trim(*args, **kwargs):
+        # Unpack required args the same way the original does
+        lambda_windows = kwargs.get("lambda_windows", args[0] if args else None)
+        equilibrated   = kwargs.get("equilibrated", False)
+        run_nos        = kwargs.get("run_nos", None)
+        start_frac     = kwargs.get("start_frac", 0.0)
+        end_frac       = kwargs.get("end_frac", 1.0)
+
+        if lambda_windows is None:
+            raise RuntimeError("lambda_windows is required")
+
+        # Let the original do its ordinary upfront checks (weights, equilibrated, etc.)
+        # BUT we’ll intercept unequal totals before it raises.
+        # We need run order and a pre-scan of per-run totals.
+        _get_valid = lambda_windows[0]._get_valid_run_nos
+        run_nos    = _get_valid(run_nos)
+        n_runs     = len(run_nos)
+
+        # --- Pre-scan per-run total effective time across windows (with the same slicing logic) ---
+        per_run_totals = [0.0] * n_runs
+        # (Optionally cache to avoid double file reads)
+        _precache = {}  # (win_id, run_idx) -> (times, grads)
+
+        for w_idx, lam_win in enumerate(lambda_windows):
+            for i, run_no in enumerate(run_nos):
+                sim = lam_win.sims[run_no - 1]
+                times, grads = sim.read_gradients()
+                _precache[(w_idx, i)] = (times, grads)
+
+                # Same slicing as original (index-based by fraction of *samples*)
+                start_idx = 0 if start_frac is None else round(start_frac * len(grads))
+                end_idx   = len(grads) if end_frac is None else round(end_frac * len(grads))
+                if end_idx - start_idx < 100:
+                    raise ValueError(
+                        "Not enough data to combine windows. Please use a larger fraction "
+                        "or run longer."
+                    )
+                t0 = times[start_idx]
+                t1 = times[end_idx - 1]
+                per_run_totals[i] += float(t1 - t0)
+
+        # Choose the common reference total as the minimum across runs
+        ref_total = min(per_run_totals) if per_run_totals else 0.0
+        # Build per-run scale factors so sum(window_durations_scaled) == ref_total
+        scale = [ (ref_total / tot if tot > 0 else 1.0) for tot in per_run_totals ]
+
+        # Log when we actually trim
+        trimmed_runs = [i+1 for i, tot in enumerate(per_run_totals) if tot > ref_total + 1e-12]
+        if trimmed_runs:
+            logger.info(
+                "[SOFT-TRIM][TI] Capping per-run total time to min across runs: "
+                "min=%.6f ns; trimmed runs=%s", ref_total, trimmed_runs
+            )
+
+        # --- Reconstruct overall_dgs and overall_times using the original logic,
+        #     but scale the per-window time arrays before summing. ---
+        _np = process_grads._np
+        n_points = 100
+        overall_dgs   = _np.zeros((n_runs, n_points))
+        overall_times = _np.zeros((n_runs, n_points))
+
+        for w_idx, lam_win in enumerate(lambda_windows):
+            for i, run_no in enumerate(run_nos):
+                times, grads = _precache[(w_idx, i)]
+                dgs = [g * lam_win.lam_val_weight for g in grads]
+
+                start_idx = 0 if start_frac is None else round(start_frac * len(dgs))
+                end_idx   = len(dgs) if end_frac is None else round(end_frac * len(dgs))
+                # (length check already done above)
+
+                times = times[start_idx:end_idx]
+                dgs   = dgs[start_idx:end_idx]
+
+                # Resize to 100 points (same as original)
+                times_resized = _np.linspace(times[0], times[-1], n_points)
+                dgs_resized   = _np.zeros(n_points)
+                idxs = _np.array([round(x) for x in _np.linspace(0, len(dgs), n_points + 1)])
+                for j in range(n_points):
+                    dgs_resized[j] = _np.mean(dgs[idxs[j]:idxs[j+1]])
+
+                # *** KEY CHANGE: sum *durations* scaled to the per-run factor ***
+                durations = times_resized - times_resized[0]           # start at 0
+                overall_times[i] += durations * scale[i]               # scaled sum
+                overall_dgs[i]   += dgs_resized
+
+            # After each window, do not raise on tiny fp differences
+            # (we made totals equal by construction, but keep a tolerant check)
+            if not _np.allclose(overall_times[:, -1], overall_times[0, -1], rtol=0, atol=1e-9):
+                # Harmonize explicitly to remove any residual noise
+                overall_times[:, -1] = overall_times[0, -1]
+
+            if _np.isnan(overall_dgs).any():
+                raise ValueError(
+                    "NaNs found in the free energy change. Please check that the simulation ran correctly."
+                )
+
+        # Rebase time axis to look like absolute time (start at 0 and end at ref_total)
+        # (The original effectively does this by construction when totals are equal.)
+        # Here overall_times already starts at 0 and ends at ref_total for every run.
+        return overall_dgs, overall_times
+
+    process_grads.get_time_series_multiwindow = _gts_ti_soft_trim
+    logger.info("[SOFT-TRIM][TI] Installed soft-trim wrapper for get_time_series_multiwindow().")
+
+
 
 
 def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
@@ -1322,6 +1438,7 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
     _GLOBAL_MBAR_MANAGER = ParallelMBARManager()
     _install_mbar_barrier_wrapper(logger)
     _install_soft_trim_time_series_wrapper(logger)
+    _install_soft_trim_time_series_wrapper_for_ti(logger)
     logger.info(f"MBAR parallel workers: {_GLOBAL_MBAR_MANAGER.max_workers}")
 
     _GLOBAL_SOMD_MANAGER = ConcurrentSOMDManager(

@@ -176,7 +176,7 @@ calc.save()
         calc.save()
     ```
     - Note that `new_runtime` must be set to 0.1 which is the minimum because when resuming a calculation, we very likely clean up some runs because of the inconsistency runtime (see step 1)
-  - Finally just for noting, I have to re-align the time-axis in the `get_time_series_multiwindow()` because the original code raise an error if runtimes are not consistency between runs (sum of all lambda windows). The monkey patch I introduced simply get the minimum runtime of the runs and re-align the time-axis. This shouldn't affect any physics in the pipeline.   
+  - Finally just for noting, I have to re-align the time-axis in the `get_time_series_multiwindow()` and `get_time_series_multiwindow_mbar()` because the original code raise an error if runtimes are not consistency between runs (sum of all lambda windows). The monkey patch I introduced simply get the minimum runtime of the runs and re-align the time-axis. This shouldn't affect any physics in the pipeline.   
     
 
  
