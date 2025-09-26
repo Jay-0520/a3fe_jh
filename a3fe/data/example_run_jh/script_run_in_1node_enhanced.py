@@ -1349,6 +1349,7 @@ def _install_soft_trim_time_series_wrapper_for_ti(logger):
         # Choose the common reference total as the minimum across runs
         ref_total = min(per_run_totals) if per_run_totals else 0.0
         # Build per-run scale factors so sum(window_durations_scaled) == ref_total
+        # TODO: this shouldn't affect the statistics, but we should verify? - by JH 2025-09-26
         scale = [ (ref_total / tot if tot > 0 else 1.0) for tot in per_run_totals ]
 
         # Log when we actually trim
@@ -1410,8 +1411,6 @@ def _install_soft_trim_time_series_wrapper_for_ti(logger):
     logger.info("[SOFT-TRIM][TI] Installed soft-trim wrapper for get_time_series_multiwindow().")
 
 
-
-
 def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
     """
     Patch VirtualQueue to run jobs locally instead of through SLURM.
@@ -1439,12 +1438,12 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
     _install_mbar_barrier_wrapper(logger)
     _install_soft_trim_time_series_wrapper(logger)
     _install_soft_trim_time_series_wrapper_for_ti(logger)
-    logger.info(f"MBAR parallel workers: {_GLOBAL_MBAR_MANAGER.max_workers}")
+    logger.info(f"Parallel MBAR max workers: {_GLOBAL_MBAR_MANAGER.max_workers}")
 
     _GLOBAL_SOMD_MANAGER = ConcurrentSOMDManager(
         max_workers=MAX_CONCURRENT_SOMD,
     )
-    logger.info(f"Concurrent SOMD workers: {_GLOBAL_SOMD_MANAGER.max_workers}")
+    logger.info(f"Concurrent SOMD max workers: {_GLOBAL_SOMD_MANAGER.max_workers}")
 
 
     # Silence subprocess calls (for ln commands and other system calls)
