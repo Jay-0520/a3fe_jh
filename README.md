@@ -160,16 +160,10 @@ calc.save()
 
 ### How to resume previously-killed run? 
 - we often need to resume calculation to extend simulations due to the sampling challenge of FEP. we can use this tool `a3fe.run.fix_simulation_times.py` to check simulations runs that were interrupted. we must ensure all runs for a given lambda have completed the same amount of runtime.
-  - first of all, use `fix_simulation_times()` to fix runtime:
-    ``` 
-    from a3fe.run.fix_simulation_times import fix_simulation_times
-
-    # sometimes we might need to run this twice because this code first fixes gaps in the data and then fixs runtime inconsistency
-    for num in range(1, 3):
-        print(f"Run fix simulation times - {num} run...")
-        fix_simulation_times(calc)  
-    ```
-  - secondly, we can apply `patch_shorter_runtime_when_resuming(new_runtime=0)` from `script_run_in_1node.py` avoid running additional simulations for lambdaw windows that were already completed:
+  - first of all, use `fix_simulation_times(calc, dry_run=False)` to remove data files for all runs of the lambda window with inconsistent runtime
+    - This is because SOMD simulation `always` (need to double check this) restart from previous check point if a .s3 file exist. Without a .s3 file,
+    simulation will always start from the begining any way
+  - secondly, we can apply `patch_shorter_runtime_when_resuming(new_runtime=0.1)` from `script_run_in_1node.py` avoid running additional simulations for lambdaw windows that were already completed:
     ```
         calc = a3.Calculation(base_dir="previous_one", input_dir="previous_one")
         patch_shorter_runtime_when_resuming(0)  # this patch can be useful to speed up the process
@@ -179,6 +173,9 @@ calc.save()
         calc.analyse()
         calc.save()
     ```
+    - Note that `new_runtime` must be set to 0.1 which is the minimum because when resuming a calculation, we very likely clean up some runs because of the inconsistency runtime (see step 1)
+  - Finally, I have to re-align the time-axis in the `get_time_series_multiwindow()` because the original code raise an error if runtimes are not consistency between runs (sum of all lambda windows). The monkey patch I introduced simply get the minimum runtime of the runs and re-align the time-axis. This shouldn't affect any physics in the pipeline  
+    
 
  
 
