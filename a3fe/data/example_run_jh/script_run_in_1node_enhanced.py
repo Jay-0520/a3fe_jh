@@ -44,6 +44,8 @@ import shlex
 from collections import defaultdict
 from decimal import Decimal
 from a3fe.run.fix_simulation_times import fix_simulation_times
+import inspect
+
 
 # Configuration options
 FORCE_LOCAL_EXECUTION = True  # Set to False for normal SLURM execution
@@ -52,6 +54,7 @@ FAST_UPDATE_INTERVAL = 3  # seconds between updates for local execution
 SKIP_ADAPTIVE_EFFICIENCY = False  # Set to True to skip adaptive efficiency checks
 MAX_CONCURRENT_SOMD = 4  # only 2 concurrent somd jobs per GPU to avoid oversubscription
 A3FE_STILL_RUNNING_THROTTLE_SEC = 600  # 10 minutes; set to 0 to disable throttling
+
 
 # ==================================================
 # LOGGING SETUP FOR LOCAL EXECUTION
@@ -738,7 +741,8 @@ class ConcurrentSOMDManager:
         self.job_counter = itertools.count(800000)  # Different range from MBAR
         self.logger = get_tagged_logger(__name__ + ".SOMD_MANAGER")
 
-        # Enhanced synchronization tracking
+        # TODO: note that the barrier only ensures that no jobs still running, but 
+        # they may end up with different total runtimes -> precondition error
         self.stage_lock = threading.Lock()
         self.gpu_semaphore = threading.Semaphore(max_workers) # not sure about this actually by JH 2025-09-24
         self.jobs_by_stage = defaultdict(set)
@@ -837,15 +841,16 @@ class ConcurrentSOMDManager:
             if self.gpu_semaphore:
                 self.gpu_semaphore.acquire()
                 acquired = True
-        
-            _ = subprocess.run(
-                parts,
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-                text=True,
-            )
+
+            with open(local_execution_log_path, "a", buffering=1) as lf:
+                _ = subprocess.run(
+                    parts,
+                    cwd=cwd,
+                    stdout=lf,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                    text=True,
+                )
             
             duration_seconds = time.time() - start_time
             end_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1150,6 +1155,148 @@ def _install_mbar_barrier_wrapper(logger):
         stage._collect_mbar_slurm = _collect_mbar_wrapper
 
 
+def _install_soft_trim_time_series_wrapper(logger):
+    """
+    Monkey-patch a3fe.analyse.process_grads.get_time_series_multiwindow_mbar
+    to 'soft-trim' the time axis per run to the minimum total across runs.
+    No files are modified; we only adjust the reported times so the
+    paired-t check can proceed.
+
+    IMPORTANT NOTE: soft-trimming the time axis in memory keeps the statistics intact 
+    and only harmonizes the x-axis
+    """
+    import a3fe.analyse.process_grads as process_grads
+
+    if hasattr(process_grads, "_orig_gts_mbar"):
+        return
+
+    process_grads._orig_gts_mbar = process_grads.get_time_series_multiwindow_mbar
+
+    def _gts_mbar_soft_trim(lambda_windows, output_dir, equilibrated=False,
+                            run_nos=None, start_frac=0.0, end_frac=1.0):
+        """
+        This is a near-copy of the upstream function, with one surgical change:
+        when constructing overall_times, we use the *minimum* total time across runs
+        for the whole stage so all runs share the same final time.
+        """
+        _np = process_grads._np
+        _get_context = process_grads._get_context
+        _submit_mbar_slurm = process_grads._submit_mbar_slurm
+        _collect_mbar_slurm = process_grads._collect_mbar_slurm
+        _compute_dg = process_grads._compute_dg  # helper defined in the module
+
+        # --- original prechecks ---
+        if equilibrated and not all([lam.equilibrated for lam in lambda_windows]):
+            raise ValueError(
+                "The equilibration times and statistics have not been set for all lambda "
+                "windows in the stage. Please set these before running this function."
+            )
+        if equilibrated:
+            for lam_win in lambda_windows:
+                lam_win._write_equilibrated_simfiles()
+
+        run_nos = lambda_windows[0]._get_valid_run_nos(run_nos)  # type: ignore
+
+        n_runs = len(run_nos)
+        n_points = 100
+        overall_dgs = _np.zeros([n_runs, n_points])
+        overall_times = _np.zeros([n_runs, n_points])
+
+        start_and_end_fracs = [
+            (i, i + (end_frac - start_frac) / n_points)
+            for i in _np.linspace(start_frac, end_frac, n_points + 1)
+        ][:-1]
+        start_and_end_fracs = [(round(x0, 5), round(x1, 5)) for (x0, x1) in start_and_end_fracs]
+
+        use_slurms = [getattr(lw, "slurm_equil_detection", True) for lw in lambda_windows]
+        if not all(u == use_slurms[0] for u in use_slurms):
+            raise ValueError(
+                "use_slurm is not the same for all lambda windows. Please ensure that "
+                "use_slurm is the same for all lambda windows."
+            )
+
+        # --- compute overall_dgs exactly as upstream ---
+        if not use_slurms[0]:
+            with _get_context("spawn").Pool() as pool:
+                results = pool.starmap(
+                    _compute_dg,
+                    [
+                        (run_no, s, e, output_dir, equilibrated)
+                        for run_no in run_nos
+                        for (s, e) in start_and_end_fracs
+                    ],
+                )
+            for i, run_no in enumerate(run_nos):
+                for j, _fr in enumerate(start_and_end_fracs):
+                    overall_dgs[i, j] = results[i * len(start_and_end_fracs) + j]
+        else:
+            frac_jobs = []
+            results = []
+            for (s, e) in start_and_end_fracs:
+                frac_jobs.append(
+                    _submit_mbar_slurm(
+                        output_dir=output_dir,
+                        virtual_queue=lambda_windows[0].virtual_queue,
+                        run_nos=run_nos,
+                        run_somd_dir=lambda_windows[0].input_dir,
+                        percentage_end=e * 100,
+                        percentage_start=s * 100,
+                        subsampling=False,
+                        equilibrated=equilibrated,
+                    )
+                )
+            for frac_job in frac_jobs:
+                jobs, mbar_outfiles, tmp_simfiles = frac_job
+                results.append(
+                    _collect_mbar_slurm(
+                        output_dir=output_dir,
+                        run_nos=run_nos,
+                        jobs=jobs,
+                        mbar_out_files=mbar_outfiles,
+                        virtual_queue=lambda_windows[0].virtual_queue,
+                        tmp_simfiles=tmp_simfiles,
+                        delete_outfiles=True,
+                    )
+                )
+            for i, _ in enumerate(run_nos):
+                for j, _fr in enumerate(start_and_end_fracs):
+                    overall_dgs[i, j] = results[j][0][i]
+
+        # --- CHANGED BLOCK: compute a common time axis using the stage's shortest total ---
+        per_run_totals = []
+        for r in run_nos:
+            tot = sum(lw.get_tot_simtime([r]) for lw in lambda_windows)
+            per_run_totals.append(float(tot))
+
+        ref_total = min(per_run_totals) if per_run_totals else 0.0
+        equil_sum = sum(lw.equil_time for lw in lambda_windows) if equilibrated else 0.0
+
+        trimmed = [t for t in per_run_totals if t > ref_total + 1e-12]
+        if trimmed:
+            logger.info(
+                "[SOFT-TRIM] Capping per-run total time to the minimum across runs: "
+                "min=%.6f ns; trimmed runs=%s",
+                ref_total,
+                [i + 1 for i, t in enumerate(per_run_totals) if t > ref_total + 1e-12],
+            )
+
+        for i, _ in enumerate(run_nos):
+            times = [(ref_total - equil_sum) * s + equil_sum for (s, _e) in start_and_end_fracs]
+            overall_times[i] = _np.array(times)
+
+        # --- keep the NaN check (unchanged) ---
+        if _np.isnan(overall_dgs).any():
+            raise ValueError(
+                "NaNs found in the free energy change. Please check that the simulation "
+                "has run correctly."
+            )
+
+        return overall_dgs, overall_times
+
+    process_grads.get_time_series_multiwindow_mbar = _gts_mbar_soft_trim
+    logger.info("[SOFT-TRIM] Installed per-run total-time soft-trim for MBAR time series.")
+
+
 def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
     """
     Patch VirtualQueue to run jobs locally instead of through SLURM.
@@ -1175,6 +1322,7 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
     # Initialize global MBAR manager
     _GLOBAL_MBAR_MANAGER = ParallelMBARManager()
     _install_mbar_barrier_wrapper(logger)
+    _install_soft_trim_time_series_wrapper(logger)
     logger.info(f"MBAR parallel workers: {_GLOBAL_MBAR_MANAGER.max_workers}")
 
     _GLOBAL_SOMD_MANAGER = ConcurrentSOMDManager(
