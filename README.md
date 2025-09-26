@@ -66,15 +66,20 @@ python -m pip install --no-deps .
     unset LD_LIBRARY_PATH
     export LD_LIBRARY_PATH="$CUDA_HOME/lib64"
     ```
-   
-### Quick Start
 
+
+### Running a3fe in one node
+- It is highly recommended to use script `a3fe_jh/a3fe/data/example_run_jh/script_run_in_1node_enhanced.py` to run a3fe calculation in one node, especially in a HPC environment, since queueing can be very slow. 
+  - for running in adaptive mode, make sure to remove this step `calc.set_equilibration_time()`
+
+
+### Quick start for simple test
 - Activate your a3fe conda environment 
 - Create a base directory for the calculation and create an directory called `input` within this
 - Move your input files into the the input directory. For example, if you have parameterised AMBER-format input files, name these bound_param.rst7, bound_param.prm7, free_param.rst7, and free_param.prm7. For more details see the documentation. Alternatively, copy the example input files from a3fe/a3fe/data/example_run_dir to your input directory.
 - Copy run somd.sh and template_config.sh from a3fe/a3fe/data/example_run_dir to your `input` directory, making sure to the SLURM options in run_somd.sh so that the jobs will run on your cluster
 - In the calculation base directory, run the following python code, either through ipython or as a python script (you will likely want to run the script with `nohup`or use ipython through tmux to ensure that the calculation is not killed when you lose connection)
-- a up-to-date run script can be found here: `a3fe_jh/a3fe/data/example_run_jh/run_calc.py`
+- a up-to-date run script can be found here: `a3fe_jh/a3fe/data/example_run_jh/script_run_in_1node_enhanced.py` (see below how to run things in one node)
     - in the same folder, we can use `protein.pdb` and `ligand.sdf` as the input to quickly test the run
 - Check the results in the ``output`` directories (separate output directories are created for the Calculation, Legs, and Stages)
 
@@ -154,16 +159,13 @@ calc.save()
     ParameterisationError: Parameterisation failed! Last error: 'Unable to create 
     OpenFF Interchange object!'
     ```    
-### Running a3fe in one node
-- It is recommended to use script `a3fe_jh/a3fe/data/example_run_jh/script_run_in_1node.py` to run a3fe calculation in one node, especially in a HPC environment, since queueing can be very slow. 
-  - for running in adaptive mode, make sure to remove this step `calc.set_equilibration_time()`
 
 ### How to resume previously-killed run? 
 - we often need to resume calculation to extend simulations due to the sampling challenge of FEP. we can use this tool `a3fe.run.fix_simulation_times.py` to check simulations runs that were interrupted. we must ensure all runs for a given lambda have completed the same amount of runtime.
   - first of all, use `fix_simulation_times(calc, dry_run=False)` to remove data files for all runs of the lambda window with inconsistent runtime
     - This is because SOMD simulation `always` (need to double check this) restart from previous check point if a .s3 file exist. Without a .s3 file,
     simulation will always start from the begining any way
-  - secondly, we can apply `patch_shorter_runtime_when_resuming(new_runtime=0.1)` from `script_run_in_1node.py` avoid running additional simulations for lambdaw windows that were already completed:
+  - secondly, we can apply `patch_shorter_runtime_when_resuming(new_runtime=0.1)` from `script_run_in_1node_enhanced.py` avoid running additional simulations for lambdaw windows that were already completed:
     ```
         calc = a3.Calculation(base_dir="previous_one", input_dir="previous_one")
         patch_shorter_runtime_when_resuming(0)  # this patch can be useful to speed up the process
@@ -178,7 +180,6 @@ calc.save()
     
 
  
-
 ### Copyright
 
 Copyright (c) 2023, Finlay Clark

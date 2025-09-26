@@ -1,8 +1,7 @@
 """
 Version: v5.0
 This script is enhanced such ways:
-    - improved logging with deduplication of repetitive status messages
-    - parallel MBAR execution with proper logging and dummy output creation if needed
+    - parallel MBAR execution
     - concurrent SOMD execution
     - robust error handling and logging for MBAR and SOMD jobs
 
