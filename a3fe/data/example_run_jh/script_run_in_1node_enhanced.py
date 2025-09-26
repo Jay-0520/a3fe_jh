@@ -1,5 +1,5 @@
 """
-Version: v4.0
+Version: v5.0
 This script is enhanced such ways:
     - improved logging with deduplication of repetitive status messages
     - parallel MBAR execution with proper logging and dummy output creation if needed
