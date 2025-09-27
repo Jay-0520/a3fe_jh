@@ -66,6 +66,7 @@ python -m pip install --no-deps .
     unset LD_LIBRARY_PATH
     export LD_LIBRARY_PATH="$CUDA_HOME/lib64"
     ```
+- it's better to set MEM >= 8G in the submission script
 
 
 ### Running a3fe in one node
