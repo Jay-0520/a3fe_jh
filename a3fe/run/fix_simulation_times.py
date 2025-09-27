@@ -1,473 +1,335 @@
-#!/usr/bin/env python3
-"""
-Simplified simulation time fixing utility.
-
-This script identifies problematic λ-windows (gaps, inconsistencies)
-and handles them by backing up the current state and preparing for a clean restart.
-
-Key principles:
-1. Detect issues systematically
-2. Backup problematic runs 
-3. Clean restart problematic windows
-4. Verify results
-
-Author: Cleaned up from original fix_simulation_times.py
-"""
-
 import os
-import shutil
 import subprocess
-from pathlib import Path
-from datetime import datetime
-from typing import List, Dict, Tuple, Optional
-import logging
 import numpy as np
 
 
-def setup_logging(calc_dir: str) -> logging.Logger:
-    log_file = Path(calc_dir) / f"simulation_cleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-
-    # force=True ensures we reconfigure even if something configured logging earlier
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[logging.FileHandler(log_file, encoding="utf-8"), logging.StreamHandler()],
-        force=True,
-    )
-
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)  # <-- important: allow INFO to pass
-    logger.propagate = True        # (default True; keep it explicit)
-
-    logger.info("Starting simulation cleanup process")
-    logger.info(f"Log file: {log_file}")
-    return logger
-
-
-def find_window(calc, leg_name: str, stage_name: str, lam: float):
-    """Find a specific λ-window in the calculation."""
-    leg = next((L for L in calc.legs if L.leg_type.name.lower() == str(leg_name).lower()), None)
-    if not leg:
-        return None
-    stage = next((S for S in leg.stages if S.stage_type.name.lower() == str(stage_name).lower()), None)
-    if not stage:
-        return None
-    win = next((W for W in stage.lam_windows if abs(W.lam - float(lam)) < 1e-9), None)
-    return leg, stage, win if win else None
-
-
-def get_simfile_end_time(sim, timestep_ns: float = 4e-6, detect_gaps: bool = True) -> Tuple[float, bool, Dict]:
+def _get_actual_simtime_from_file(sim, timestep_ns=4e-6, detect_gaps=True):
     """
-    Get the end time of the first contiguous block in a simulation file.
-    
-    Returns:
-        end_time_ns: End time of first contiguous block
-        had_gap: Whether gaps were detected
-        details: Additional information about the analysis
+    Robustly determine the actual simulation time from simfile.dat
+    by scanning to the last valid data line, with optional gap detection.
     """
-    simfile_path = Path(sim.output_dir) / "simfile.dat"
-    
-    if not simfile_path.exists() or simfile_path.stat().st_size == 0:
-        return 0.0, False, {"status": "no_file"}
-    
+    simfile_path = os.path.join(sim.output_dir, "simfile.dat")
+    if not os.path.exists(simfile_path) or os.stat(simfile_path).st_size == 0:
+        return 0.0
+
     steps = []
     with open(simfile_path, "r") as f:
         for line in f:
             if line.startswith("#") or not line.strip():
                 continue
             try:
-                step = int(line.split()[0])
-                steps.append(step)
-            except (ValueError, IndexError):
+                parts = line.split()
+                if parts:
+                    step = int(parts[0])
+                    steps.append(step)
+            except ValueError:
                 continue
-    
+
     if not steps:
-        return 0.0, False, {"status": "no_data"}
+        return 0.0
     
-    if len(steps) < 2 or not detect_gaps:
-        return steps[-1] * timestep_ns, False, {
-            "status": "complete",
-            "start_step": steps[0],
-            "end_step": steps[-1],
-            "total_steps": len(steps)
-        }
+    if not detect_gaps:
+        return steps[-1] * timestep_ns
     
-    # Detect gaps
+    # Detect gaps in step sequence
+    if len(steps) < 2:
+        return steps[-1] * timestep_ns
+    
+    # Calculate step intervals
     intervals = np.diff(steps)
-    median_interval = np.median(intervals) if len(intervals) else 0
+    median_interval = np.median(intervals)
     
-    if median_interval <= 0:
-        return steps[-1] * timestep_ns, False, {
-            "status": "complete",
-            "start_step": steps[0], 
-            "end_step": steps[-1],
-            "total_steps": len(steps)
-        }
-    
-    # Look for gaps larger than 2x median interval
+    # Find large gaps (more than 2x the median interval)
     gap_threshold = 2 * median_interval
     large_gaps = np.where(intervals > gap_threshold)[0]
     
     if len(large_gaps) == 0:
-        return steps[-1] * timestep_ns, False, {
-            "status": "complete",
-            "start_step": steps[0],
-            "end_step": steps[-1], 
-            "total_steps": len(steps)
-        }
+        return steps[-1] * timestep_ns
     
-    # Gap detected - return end of first contiguous block
-    end_idx = large_gaps[0]
-    return steps[end_idx] * timestep_ns, True, {
-        "status": "gap_detected",
-        "start_step": steps[0],
-        "end_step": steps[end_idx],
-        "first_block_steps": end_idx + 1,
-        "total_steps": len(steps),
-        "gap_at_step": steps[end_idx + 1],
-        "median_interval": median_interval
-    }
+    # Always use the first contiguous block (from the beginning)
+    first_gap_idx = large_gaps[0]  # Index of first large gap
+    start_idx = 0
+    end_idx = first_gap_idx  # End at the first gap (inclusive)
+    block_size = end_idx - start_idx + 1
+    
+    if detect_gaps:
+        sim._logger.info(f"Gap detection results for {simfile_path}:")
+        sim._logger.info(f"  Total steps: {len(steps)}")
+        sim._logger.info(f"  Median interval: {median_interval}")
+        sim._logger.info(f"  Large gaps found: {len(large_gaps)}")
+        sim._logger.info(f"  [ACTUAL SIMTIME] Using first contiguous block: steps {steps[start_idx]} to {steps[end_idx]} ({block_size} entries)")
+        
+    # Return time based on largest contiguous block
+    return steps[end_idx] * timestep_ns
 
 
-def analyze_window_times(calc, logger: logging.Logger) -> Dict[Tuple[str, str, float], Dict]:
+def _get_first_block_end_time(sim, timestep_ns=None, gap_factor=2.0):
     """
-    Analyze simulation times for all λ-windows.
-    
-    Returns:
-        Dictionary mapping (leg, stage, lambda) to analysis results
+    Compute the end time (ns) of the first contiguous block.
+    If no gap is found, returns the total time and had_gap=False.
     """
-    results = {}
-    
+    simfile_path = os.path.join(sim.output_dir, "simfile.dat")
+    if not os.path.exists(simfile_path) or os.stat(simfile_path).st_size == 0:
+        return 0.0, False, {}
+
+    if timestep_ns is None:
+        timestep_ns = getattr(sim, "timestep", 4e-6)
+
+    steps = []
+    with open(simfile_path, "r") as f:
+        for line in f:
+            if line.startswith("#") or not line.strip():
+                continue
+            try:
+                steps.append(int(line.split()[0]))
+            except ValueError:
+                continue
+
+    if not steps:
+        return 0.0, False, {}
+    if len(steps) < 2:
+        return steps[-1] * timestep_ns, False, {"start_step": steps[0], "end_step": steps[-1], "block_len": 1}
+
+    intervals = np.diff(steps)
+    median_interval = np.median(intervals)
+
+    large_gaps = np.where(intervals > gap_factor * median_interval)[0]
+    if len(large_gaps) == 0:
+        return steps[-1] * timestep_ns, False, {"start_step": steps[0], "end_step": steps[-1], "block_len": len(steps)}
+
+    end_idx = large_gaps[0]  # last sample before the gap
+    details = {"start_step": steps[0], "end_step": steps[end_idx], "block_len": end_idx + 1}
+    return steps[end_idx] * timestep_ns, True, details
+
+
+def truncate_simulations_to_minimum(calc, detect_gaps=True):
+    """
+    Truncate all simulations to the minimum runtime for each lambda window,
+    using robust parsing of simfile.dat instead of get_tot_simtime().
+
+    UPDATED POLICY: if a gap exists in any sim, ALWAYS truncate that sim
+    to the end of its first contiguous block (delete the rest), regardless
+    of cross-run consistency.
+    """
+    logger = calc._logger
+
     for leg in calc.legs:
-        leg_name = leg.leg_type.name
         for stage in leg.stages:
-            stage_name = stage.stage_type.name
-            for win in stage.lam_windows:
-                lam = float(win.lam)
-                key = (leg_name, stage_name, lam)
-                
+            stage_has_issues = False
+
+            for lam_window in stage.lam_windows:
                 sim_times = []
-                had_gaps = []
-                details_list = []
-                
-                for sim in win.sims:
-                    time_ns, gap, details = get_simfile_end_time(sim)
-                    sim_times.append(time_ns)
-                    had_gaps.append(gap)
-                    details_list.append(details)
-                
-                if sim_times:
-                    times_array = np.array(sim_times)
-                    min_time = np.min(times_array)
-                    max_time = np.max(times_array)
-                    range_time = max_time - min_time
-                    median_time = np.median(times_array)
-                    
-                    results[key] = {
-                        "times": sim_times,
-                        "had_gaps": had_gaps,
-                        "details": details_list,
-                        "min_time": min_time,
-                        "max_time": max_time,
-                        "range_time": range_time,
-                        "median_time": median_time,
-                        "n_sims": len(sim_times)
-                    }
-                    
-                    # Log summary
-                    gap_count = sum(had_gaps)
-                    if gap_count > 0 or range_time > 0.01:  # 0.01 ns threshold
-                        logger.warning(f"{leg_name}/{stage_name} λ={lam:.3f}: "
-                                     f"times={np.round(sim_times, 6)} ns, "
-                                     f"gap_details={details_list}, "
-                                    #  f"range={range_time:.4f} ns, "
-                                     f"gaps={gap_count}/{len(sim_times)}")
-                    else:
-                        logger.debug(f"{leg_name}/{stage_name} λ={lam:.3f}: ✅ consistent at {min_time:.6f} ns")
-    
-    return results
+                had_gaps = []       
+                first_block_times = [] 
+                fb_details = []        
+
+                for sim in lam_window.sims:
+                    # Always compute first-block end time
+                    fb_time, had_gap, details = _get_first_block_end_time(
+                        sim, timestep_ns=getattr(sim, "timestep", 4e-6), gap_factor=2.0
+                    )  
+                    first_block_times.append(fb_time)  
+                    had_gaps.append(had_gap)         
+                    fb_details.append(details)       
+
+                    # For consistency checks, use the "effective" time we intend to rely on
+                    sim_times.append(fb_time) 
+
+                    if had_gap:
+                        logger.warning(
+                            f"  Gap detected in {os.path.join(sim.output_dir, 'simfile.dat')}: "
+                            f"keeping first block steps {details.get('start_step')}–{details.get('end_step')} "
+                            f"({details.get('block_len')} entries)"  
+                        )
+
+                # If any sim has a gap, enforce the first-block trimming per sim  
+                if detect_gaps and any(had_gaps): 
+                    logger.info(
+                        f"❌ Leg {leg.leg_type.name} Stage {stage.stage_type.name} Lambda {lam_window.lam:.3f}: gaps detected → trimming each run to its first contiguous block"  
+                    )
+                    for sim, fb_time in zip(lam_window.sims, first_block_times):
+                        truncate_simulation_file(sim, fb_time, logger, detect_gaps=False)  # (turn off inner gap logic)
+                    # After explicit trimming, no need for min-time truncation on this λ-window  
+                    continue  
+
+                # No gaps at all → fall back to min-time truncation if inconsistent (old behavior)
+                min_time = min(sim_times)
+                max_time = max(sim_times)
+
+                if abs(max_time - min_time) > 0.01:
+                    stage_has_issues = True
+                    logger.warning(f"❌ Leg {leg.leg_type.name} Stage {stage.stage_type.name} Lambda {lam_window.lam:.3f}: Inconsistent times {sim_times}")
+                    logger.warning(f"  -> Truncating to minimum: {min_time:.6f} ns")
+
+                    for i, sim in enumerate(lam_window.sims):
+                        if sim_times[i] > min_time:
+                            truncate_simulation_file(sim, min_time, logger, detect_gaps=False)
+                            logger.info(
+                                f"     Truncated run {sim.run_no}: {sim_times[i]:.6f} -> {min_time:.6f} ns"
+                            )
+                else:
+                    logger.debug(
+                        f"Lambda {lam_window.lam:.3f}: ✅ All runs consistent at {min_time:.6f} ns"
+                    )
+
+            if not stage_has_issues:
+                logger.info(f" - Leg {leg.leg_type.name} Stage {stage.stage_type.name} has no timing issues")
 
 
-def identify_problematic_windows(analysis_results: Dict, 
-                                inconsistency_threshold: float = 0.01,
-                                logger: Optional[logging.Logger] = None) -> List[Tuple]:
+def truncate_simulation_file(simulation, target_time_ns, logger, detect_gaps=True):
     """
-    Identify λ-windows that need restart based on analysis results.
-    
-    Returns:
-        List of (leg, stage, lambda, reason_dict) tuples
+    Truncate a simulation file to a specific time (ns).
+    When detect_gaps is True, this function will *also* reduce to the first
+    contiguous block *before* applying time-based truncation; however, when
+    you already pass target_time_ns as the first-block end, call with
+    detect_gaps=False to avoid double work.  # UPDATED
     """
-    problematic = []
-    
-    for (leg, stage, lam), results in analysis_results.items():
-        reasons = {}
-        
-        # Check for gaps
-        if any(results["had_gaps"]):
-            reasons["gaps"] = {
-                "count": sum(results["had_gaps"]),
-                "total": len(results["had_gaps"])
-            }
-        
-        # Check for time inconsistencies
-        if results["range_time"] > inconsistency_threshold:
-            reasons["inconsistent_times"] = {
-                "range_ns": results["range_time"],
-                "threshold_ns": inconsistency_threshold,
-                "times": results["times"]
-            }
-        
-        
-        if reasons:
-            problematic.append((leg, stage, lam, reasons))
-            if logger:
-                reason_summary = list(reasons.keys())
-                logger.info(f"Problematic: {leg}/{stage} λ={lam:.3f} - {reason_summary}")
-    
-    
-    return problematic
+    simfile_path = os.path.join(simulation.output_dir, "simfile.dat")
+
+    if not os.path.exists(simfile_path):
+        logger.warning(f"Warning: {simfile_path} does not exist, skipping truncation")
+        return
+
+    # Use the simulation's timestep if available 
+    # TODO: or we should get this from somd.cfg file?
+    timestep_ns = getattr(simulation, "timestep", 4e-6) 
+
+    with open(simfile_path, 'r') as f:
+        lines = f.readlines()
+
+    header_lines = []
+    steps = []
+
+    for line in lines:
+        if line.startswith('#'):
+            header_lines.append(line)
+        elif line.strip():
+            try:
+                parts = line.split()
+                if parts:
+                    step = int(parts[0])
+                    time_ns = step * timestep_ns
+                    steps.append((step, time_ns, line))
+            except (ValueError, IndexError):
+                continue
+
+    if not steps:
+        logger.warning(f"Warning: No valid data found in {simfile_path}")
+        return
+
+    # Optional inner gap handling (can be disabled by caller) 
+    if detect_gaps and len(steps) > 1:
+        step_nums = [s[0] for s in steps]
+        intervals = np.diff(step_nums)
+        median_interval = np.median(intervals)
+        if median_interval > 0: 
+            gap_threshold = 2 * median_interval
+            large_gaps = np.where(intervals > gap_threshold)[0]
+
+            if len(large_gaps) > 0:
+                first_gap_idx = large_gaps[0]
+                start_idx = 0
+                end_idx = first_gap_idx
+                logger.warning(f"     Gap detected in {simfile_path}")
+                logger.info(
+                    f"     Using first contiguous block: steps {step_nums[start_idx]} to {step_nums[end_idx]} "
+                    f"({end_idx - start_idx + 1} entries)"
+                )
+                steps = steps[start_idx:end_idx + 1]
+
+    # Time-based truncation to target_time_ns
+    final_data_lines = []
+    for step, time_ns, line in steps:
+        if time_ns <= target_time_ns + 1e-9:
+            final_data_lines.append(line)
+        else:
+            break
+
+    if not final_data_lines:
+        logger.warning(f"Warning: No valid data found within target time in {simfile_path}")
+        return
+
+    # Backup
+    backup_path = simfile_path + ".backup"
+    if not os.path.exists(backup_path):
+        subprocess.run(['cp', simfile_path, backup_path])
+
+    # Write truncated file
+    with open(simfile_path, 'w') as f:
+        for line in header_lines:
+            f.write(line)
+        for line in final_data_lines:
+            f.write(line)
+
+    last_step = int(final_data_lines[-1].split()[0])
+    actual_time = last_step * timestep_ns
+    logger.info(f"     Truncated to step {last_step}, actual time: {actual_time:.6f} ns")
 
 
-def backup_and_clean_window(calc, leg: str, stage: str, lam: float, 
-                           backup_dir: Path, logger: logging.Logger,
-                           dry_run: bool = False) -> bool:
+
+def verify_truncation(calc):
     """
-    Backup a problematic λ-window and clean it for restart.
-    
-    Returns:
-        True if successful, False if failed
+    Verify using the *post-trim* definition of time:
+    simply read the last kept step (no gap logic), which reflects the file on disk.
     """
-    found = find_window(calc, leg, stage, lam)
-    if not found or len(found) != 3:
-        logger.error(f"λ-window not found: {leg}/{stage} λ={lam}")
-        return False
+    logger = calc._logger
+    all_consistent = True
+
+    for leg in calc.legs:
+        for stage in leg.stages:
+            for lam_window in stage.lam_windows:
+                sim_times = []
+                for sim in lam_window.sims:
+                    # Use raw last-step time from file (no gap analysis)
+                    t_ns = _get_actual_simtime_from_file(
+                        sim,
+                        timestep_ns=getattr(sim, "timestep", 4e-6),
+                        detect_gaps=False, 
+                    )
+                    sim_times.append(t_ns)
+
+                min_time = min(sim_times)
+                max_time = max(sim_times)
+
+                if abs(max_time - min_time) > 0.01:
+                    logger.error(
+                        f"Leg {leg.leg_type.name} Stage {stage.stage_type.name} "
+                        f"Lambda {lam_window.lam:.3f}: ❌ Still inconsistent: {sim_times}"
+                    )
+                    all_consistent = False
+                else:
+                    logger.debug(
+                        f"Leg {leg.leg_type.name} Stage {stage.stage_type.name} "
+                        f"Lambda {lam_window.lam:.3f}: ✅ Consistent at {min_time:.6f} ns"
+                    )
+
+    if all_consistent:
+        logger.info("✅ ALL SIMULATIONS NOW HAVE CONSISTENT TIMES!")
+    else:
+        logger.error("❌ Some simulations still have inconsistent times")
+
+    return all_consistent
+
+
+
+def fix_simulation_times(calc, apply_truncation=True, detect_gaps=True):
+    """
+    Complete workflow to fix inconsistent simulation times.
     
-    _, _, win = found
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    In practice, we might have to run this multiple times if there are
+    multiple gaps as well as inconsistent runtimes in different runs.
+    """
+    logger = calc._logger
+    if apply_truncation:
+        logger.info("Starting simulation time fixing process...")
+        truncate_simulations_to_minimum(calc, detect_gaps=detect_gaps)
+
+    success = verify_truncation(calc)
     
-    success = True
-    for i, sim in enumerate(win.sims):
-        sim_dir = Path(sim.output_dir)
-        
-        # Create backup directory structure
-        rel_path = sim_dir.relative_to(Path(calc.base_dir))
-        backup_sim_dir = backup_dir / f"backup_{timestamp}" / rel_path
-        
-        if dry_run:
-            logger.info(f"[DRY RUN] Would backup {sim_dir} -> {backup_sim_dir}")
-            logger.info(f"[DRY RUN] Would clean restart files in {sim_dir}")
-            continue
-        
-        try:
-            # Create backup
-            backup_sim_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Backup key files
-            files_to_backup = [
-                "simfile.dat",
-                "gradients.dat", 
-                "*.s3",
-                "*.s3.previous",
-                "*.log",
-                "*.out",
-                "*.err"
-            ]
-            
-            backed_up_files = []
-            for pattern in files_to_backup:
-                for file_path in sim_dir.glob(pattern):
-                    if file_path.is_file():
-                        backup_file = backup_sim_dir / file_path.name
-                        shutil.copy2(file_path, backup_file)
-                        backed_up_files.append(file_path.name)
-            
-            logger.info(f"Backed up {len(backed_up_files)} files from {sim_dir.name} to {backup_sim_dir}")
-            
-            # Clean restart files (but keep input files)
-            files_to_remove = [
-                "simfile.dat",
-                "gradients.dat",
-                "*.s3", 
-                "*.s3.previous"
-            ]
-            
-            removed_files = []
-            for pattern in files_to_remove:
-                for file_path in sim_dir.glob(pattern):
-                    if file_path.is_file():
-                        file_path.unlink()
-                        removed_files.append(file_path.name)
-            
-            logger.info(f"Removed {len(removed_files)} restart files from {sim_dir.name}")
-            
-        except Exception as e:
-            logger.error(f"Failed to backup/clean {sim_dir}: {e}")
-            success = False
+    if success:
+        logger.info("\n🎉 Ready to proceed with next steps!")
+    else:
+        logger.warning("\n⚠️  Some issues remain. Manual inspection may be required.")
     
     return success
-
-
-def create_restart_summary(problematic_windows: List[Tuple], 
-                          backup_dir: Path, 
-                          logger: logging.Logger) -> None:
-    """Create a summary file of what was cleaned and needs restart."""
-    
-    summary_file = backup_dir / "restart_summary.txt"
-    
-    with open(summary_file, "w") as f:
-        f.write(f"Simulation Cleanup Summary\n")
-        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"=" * 50 + "\n\n")
-        
-        f.write(f"Windows cleaned for restart ({len(problematic_windows)} total):\n\n")
-        
-        for leg, stage, lam, reasons in problematic_windows:
-            f.write(f"• {leg}/{stage} λ={lam:.3f}\n")
-            f.write(f"  Reasons: {list(reasons.keys())}\n")
-            
-            if "gaps" in reasons:
-                gap_info = reasons["gaps"]
-                f.write(f"  - Gaps detected: {gap_info['count']}/{gap_info['total']} simulations\n")
-            
-            if "inconsistent_times" in reasons:
-                time_info = reasons["inconsistent_times"]
-                f.write(f"  - Time range: {time_info['range_ns']:.4f} ns (threshold: {time_info['threshold_ns']:.4f} ns)\n")
-            
-            if "short_outliers" in reasons:
-                outlier_info = reasons["short_outliers"]
-                f.write(f"  - Short outliers: {outlier_info['short_count']} simulations below {outlier_info['threshold_fraction']:.0%} of median\n")
-            
-            f.write("\n")
-        
-        f.write(f"\nNext steps:\n")
-        f.write(f"1. Review this summary\n")
-        f.write(f"2. Re-run simulations for the cleaned windows\n") 
-        f.write(f"3. Run verification after completion\n")
-        f.write(f"\nBackup location: {backup_dir}\n")
-    
-    logger.info(f"Restart summary written to: {summary_file}")
-
-
-def main_cleanup_workflow(calc, 
-                         inconsistency_threshold: float = 0.01,
-                         dry_run: bool = True) -> Dict:
-    """
-    Main workflow for cleaning up problematic simulations.
-    
-    Args:
-        calc: The calculation object
-        inconsistency_threshold: Maximum allowed time range between simulations (ns)
-        dry_run: If True, only show what would be done without making changes
-        
-    Returns:
-        Dictionary with cleanup results
-    """
-    # Setup
-    calc_dir = Path(calc.base_dir)
-    logger = setup_logging(calc_dir)
-    
-    backup_base_dir = calc_dir / "cleanup_backups" 
-    backup_base_dir.mkdir(exist_ok=True)
-    
-    logger.info("=" * 60)
-    logger.info("SIMULATION CLEANUP WORKFLOW")
-    logger.info("=" * 60)
-    logger.info(f"Calculation directory: {calc_dir}")
-    logger.info(f"Inconsistency threshold: {inconsistency_threshold:.4f} ns")
-    logger.info(f"Dry run mode: {dry_run}")
-    
-    # Step 1: Analyze all windows
-    logger.info("\n1. ANALYZING SIMULATION TIMES...")
-    analysis_results = analyze_window_times(calc, logger)
-    
-    total_windows = len(analysis_results)
-    logger.info(f"Analyzed {total_windows} λ-windows")
-    
-    # Step 2: Identify problematic windows  
-    logger.info("\n2. IDENTIFYING PROBLEMATIC WINDOWS...")
-    problematic_windows = identify_problematic_windows(
-        analysis_results, 
-        inconsistency_threshold=inconsistency_threshold,
-        logger=logger
-    )
-    
-    if not problematic_windows:
-        logger.info("✅ No problematic windows found! All simulations look good.")
-        return {
-            "success": True,
-            "total_windows": total_windows,
-            "problematic_windows": 0,
-            "cleaned_windows": 0,
-            "message": "All simulations are consistent"
-        }
-    
-    logger.info(f"Found {len(problematic_windows)} problematic windows")
-    
-    # Step 3: Backup and clean
-    logger.info(f"\n3. BACKUP AND CLEANUP...")
-    
-    if dry_run:
-        logger.info("DRY RUN MODE - No actual changes will be made")
-    
-    cleaned_count = 0
-    failed_count = 0
-    
-    for leg, stage, lam, reasons in problematic_windows:
-        logger.info(f"Processing {leg}/{stage} λ={lam:.3f}...")
-        
-        success = backup_and_clean_window(
-            calc, leg, stage, lam, backup_base_dir, logger, dry_run=dry_run
-        )
-        
-        if success:
-            cleaned_count += 1
-        else:
-            failed_count += 1
-    
-    # Step 4: Create summary
-    if not dry_run:
-        logger.info(f"\n4. CREATING RESTART SUMMARY...")
-        create_restart_summary(problematic_windows, backup_base_dir, logger)
-    
-    # Final summary
-    logger.info("\n" + "=" * 60)
-    logger.info("CLEANUP COMPLETE")
-    logger.info("=" * 60)
-    logger.info(f"Total windows analyzed: {total_windows}")
-    logger.info(f"Problematic windows found: {len(problematic_windows)}")
-    logger.info(f"Successfully cleaned: {cleaned_count}")
-    logger.info(f"Failed to clean: {failed_count}")
-    
-    if not dry_run and cleaned_count > 0:
-        logger.info(f"\n⚠️  IMPORTANT: {cleaned_count} windows have been cleaned and need to be restarted")
-        logger.info(f"📁 Backup location: {backup_base_dir}")
-        logger.info(f"📋 Review restart summary: {backup_base_dir}/restart_summary.txt")
-    
-    success = failed_count == 0
-    
-    return {
-        "success": success,
-        "total_windows": total_windows,
-        "problematic_windows": len(problematic_windows), 
-        "cleaned_windows": cleaned_count,
-        "failed_windows": failed_count,
-        "backup_location": str(backup_base_dir) if not dry_run else None,
-        "dry_run": dry_run
-    }
-
-
-# Convenience functions for external use
-def fix_simulation_times(calc, **kwargs):
-    """
-    Simplified interface to the cleanup workflow.
-    
-    This replaces the complex fix_simulation_times function from the original script
-    with a clean, backup-focused approach.
-    """
-    return main_cleanup_workflow(calc, **kwargs)
-
-
-def quick_analysis(calc):
-    """Quick analysis of simulation times without making changes."""
-    return main_cleanup_workflow(calc, dry_run=True)
 
