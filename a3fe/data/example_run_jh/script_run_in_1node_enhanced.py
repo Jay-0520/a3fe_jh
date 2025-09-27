@@ -745,10 +745,10 @@ class ConcurrentSOMDManager:
         self.stage_lock = threading.Lock()
         self.gpu_semaphore = threading.Semaphore(max_workers) # not sure about this actually by JH 2025-09-24
         self.jobs_by_stage = defaultdict(set)
-        self.completed_jobs = set() 
-   
+        self.completed_jobs = set()
+
     def submit_somd_job(self, script_path: str, lambda_str: str, cwd: str, run_no: int) -> int:
-        """Submit a SOMD job for concurrent execution."""
+        """Submit a SOMD job for concurrent execution."""        
         job_id = next(self.job_counter)
         submit_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # TODO: we might need to consolidate the two
@@ -758,7 +758,6 @@ class ConcurrentSOMDManager:
         # Submit to executor
         future = self.executor.submit(self._run_somd_worker, job_id, script_path, lambda_str, cwd, run_no)
         self.futures[job_id] = future
-
         # Store metadata
         self.job_metadata[job_id] = {
             'script_path': script_path,
@@ -881,7 +880,7 @@ class ConcurrentSOMDManager:
         finally:
             if acquired:
                 self.gpu_semaphore.release()
-        
+
             with self.stage_lock:
                     self.completed_jobs.add(job_id)
                     meta = self.job_metadata.get(job_id, {})
@@ -1305,110 +1304,191 @@ def _install_soft_trim_time_series_wrapper_for_ti(logger):
 
     process_grads._orig_gts_ti = process_grads.get_time_series_multiwindow
 
-    def _gts_ti_soft_trim(*args, **kwargs):
-        # Unpack required args the same way the original does
-        lambda_windows = kwargs.get("lambda_windows", args[0] if args else None)
-        equilibrated   = kwargs.get("equilibrated", False)
-        run_nos        = kwargs.get("run_nos", None)
-        start_frac     = kwargs.get("start_frac", 0.0)
-        end_frac       = kwargs.get("end_frac", 1.0)
+    def _gts_ti_soft_trim(lambda_windows, equilibrated=False,
+                          run_nos=None, start_frac=0.0, end_frac=1.0):
+        # --- begin: upstream logic (kept intact) ---
+        if any([not lw.lam_val_weight for lw in lambda_windows]):
+            raise ValueError(
+                "Lambda value weight not set for all windows. Please set the lambda value weight "
+                "to use get_time_series_multiwindow."
+            )
+        if equilibrated and any([not lw._equilibrated for lw in lambda_windows]):
+            raise ValueError(
+                "_equilibrated must be set for all windows to use get_time_series_multiwindow"
+            )
+        if equilibrated:
+            for lw in lambda_windows:
+                lw._write_equilibrated_simfiles()
 
-        if lambda_windows is None:
-            raise RuntimeError("lambda_windows is required")
+        run_nos = lambda_windows[0]._get_valid_run_nos(run_nos)
 
-        # Let the original do its ordinary upfront checks (weights, equilibrated, etc.)
-        # BUT we’ll intercept unequal totals before it raises.
-        # We need run order and a pre-scan of per-run totals.
-        _get_valid = lambda_windows[0]._get_valid_run_nos
-        run_nos    = _get_valid(run_nos)
-        n_runs     = len(run_nos)
+        n_runs = len(run_nos)
+        n_bins = 100
+        overall_dgs   = _np.zeros((n_runs, n_bins))
+        overall_times = _np.zeros((n_runs, n_bins))
 
-        # --- Pre-scan per-run total effective time across windows (with the same slicing logic) ---
-        per_run_totals = [0.0] * n_runs
-        # (Optionally cache to avoid double file reads)
-        _precache = {}  # (win_id, run_idx) -> (times, grads)
-
-        for w_idx, lam_win in enumerate(lambda_windows):
+        for lw in lambda_windows:
             for i, run_no in enumerate(run_nos):
-                sim = lam_win.sims[run_no - 1]
+                sim = lw.sims[run_no - 1]
                 times, grads = sim.read_gradients()
-                _precache[(w_idx, i)] = (times, grads)
 
-                # Same slicing as original (index-based by fraction of *samples*)
-                start_idx = 0 if start_frac is None else round(start_frac * len(grads))
-                end_idx   = len(grads) if end_frac is None else round(end_frac * len(grads))
-                if end_idx - start_idx < 100:
+                dgs = [g * lw.lam_val_weight for g in grads]
+                s_idx = 0 if start_frac is None else round(start_frac * len(dgs))
+                e_idx = len(dgs) if end_frac  is None else round(end_frac  * len(dgs))
+
+                if e_idx - s_idx < n_bins:
                     raise ValueError(
-                        "Not enough data to combine windows. Please use a larger fraction "
-                        "or run longer."
+                        "Not enough data to combine windows. Please use a larger fraction of the "
+                        "total simulation time or run the simulations for longer."
                     )
-                t0 = times[start_idx]
-                t1 = times[end_idx - 1]
-                per_run_totals[i] += float(t1 - t0)
+                times = times[s_idx:e_idx]
+                dgs   = dgs[s_idx:e_idx]
 
-        # Choose the common reference total as the minimum across runs
-        ref_total = min(per_run_totals) if per_run_totals else 0.0
-        # Build per-run scale factors so sum(window_durations_scaled) == ref_total
-        # TODO: this shouldn't affect the statistics, but we should verify? - by JH 2025-09-26
-        scale = [ (ref_total / tot if tot > 0 else 1.0) for tot in per_run_totals ]
+                # block-average each window into 100 bins (as upstream)
+                t_res  = _np.linspace(times[0], times[-1], n_bins)
+                edges  = _np.array([round(x) for x in _np.linspace(0, len(dgs), n_bins+1)])
+                dg_res = _np.array([_np.mean(dgs[edges[j]:edges[j+1]]) for j in range(n_bins)])
 
-        # Log when we actually trim
-        trimmed_runs = [i+1 for i, tot in enumerate(per_run_totals) if tot > ref_total + 1e-12]
-        if trimmed_runs:
-            logger.info(
-                "[SOFT-TRIM][TI] Capping per-run total time to min across runs: "
-                "min=%.6f ns; trimmed runs=%s", ref_total, trimmed_runs
+                overall_dgs[i]   += dg_res
+                overall_times[i] += t_res
+        # --- end: upstream logic ---
+
+        # HARD-TRIM: drop the tail so all runs end at the shortest total time (no warping)
+        finals    = overall_times[:, -1]
+        ref_total = float(finals.min())
+
+        # For each run, find last index with time <= ref_total
+        cut_each = []
+        for i in range(n_runs):
+            j = int(_np.searchsorted(overall_times[i], ref_total, side="right") - 1)
+            j = max(0, min(j, n_bins - 1))
+            cut_each.append(j)
+
+        K = min(cut_each) + 1  # common kept length
+        if K < 10:
+            raise ValueError(f"After hard-trim only {K} bins remain; not enough for diagnostics.")
+
+        overall_dgs   = overall_dgs[:, :K]
+        overall_times = overall_times[:, :K]
+
+        if _np.isnan(overall_dgs).any():
+            raise ValueError(
+                "NaNs found in the free energy change. Please check that the simulation ran correctly."
             )
 
-        # --- Reconstruct overall_dgs and overall_times using the original logic,
-        #     but scale the per-window time arrays before summing. ---
-        _np = process_grads._np
-        n_points = 100
-        overall_dgs   = _np.zeros((n_runs, n_points))
-        overall_times = _np.zeros((n_runs, n_points))
-
-        for w_idx, lam_win in enumerate(lambda_windows):
-            for i, run_no in enumerate(run_nos):
-                times, grads = _precache[(w_idx, i)]
-                dgs = [g * lam_win.lam_val_weight for g in grads]
-
-                start_idx = 0 if start_frac is None else round(start_frac * len(dgs))
-                end_idx   = len(dgs) if end_frac is None else round(end_frac * len(dgs))
-                # (length check already done above)
-
-                times = times[start_idx:end_idx]
-                dgs   = dgs[start_idx:end_idx]
-
-                # Resize to 100 points (same as original)
-                times_resized = _np.linspace(times[0], times[-1], n_points)
-                dgs_resized   = _np.zeros(n_points)
-                idxs = _np.array([round(x) for x in _np.linspace(0, len(dgs), n_points + 1)])
-                for j in range(n_points):
-                    dgs_resized[j] = _np.mean(dgs[idxs[j]:idxs[j+1]])
-
-                # *** KEY CHANGE: sum *durations* scaled to the per-run factor ***
-                durations = times_resized - times_resized[0]           # start at 0
-                overall_times[i] += durations * scale[i]               # scaled sum
-                overall_dgs[i]   += dgs_resized
-
-            # After each window, do not raise on tiny fp differences
-            # (we made totals equal by construction, but keep a tolerant check)
-            if not _np.allclose(overall_times[:, -1], overall_times[0, -1], rtol=0, atol=1e-9):
-                # Harmonize explicitly to remove any residual noise
-                overall_times[:, -1] = overall_times[0, -1]
-
-            if _np.isnan(overall_dgs).any():
-                raise ValueError(
-                    "NaNs found in the free energy change. Please check that the simulation ran correctly."
-                )
-
-        # Rebase time axis to look like absolute time (start at 0 and end at ref_total)
-        # (The original effectively does this by construction when totals are equal.)
-        # Here overall_times already starts at 0 and ends at ref_total for every run.
+        logger.info(f"[HARD-TRIM TI] Kept {K} bins up to {ref_total:.6f} ns (dropped late bins from longer runs).")
         return overall_dgs, overall_times
 
     process_grads.get_time_series_multiwindow = _gts_ti_soft_trim
     logger.info("[SOFT-TRIM][TI] Installed soft-trim wrapper for get_time_series_multiwindow().")
+
+
+
+def patch_stage_adaptive_efficiency_with_barrier():
+    from a3fe.run.stage import Stage
+    from a3fe.analyse.process_grads import GradientData as _GradientData
+    import numpy as _np
+    from time import sleep as _sleep
+    import math as _math
+
+    if not hasattr(Stage, "_orig_ad_eff"):
+        Stage._orig_ad_eff = Stage._run_loop_adaptive_efficiency  # keep original around
+
+    def _run_loop_adaptive_efficiency_barrier(
+        self,
+        run_nos,
+        cycle_pause: int = 60,
+        max_runtime: float = 30,   # ns
+    ):
+        """
+        Adaptive efficiency loop that synchronizes with the ConcurrentSOMDManager.
+        We DO NOT rely on self.running_wins; instead we block the stage on manager jobs
+        before each re-analysis/resubmission step to ensure all in-flight work is complete.
+        """
+        # Convenience names for logging and barrier key
+        leg = getattr(self.leg_type, "name", "unknown").lower()
+        stg = getattr(self.stage_type, "name", "unknown").lower()
+
+        while not self._maximally_efficient:
+            stage_total_simtime = sum(win.get_tot_simtime(run_nos=run_nos) for win in self.lam_windows)
+            self._logger.info(
+                f"Current total runtime -> {stage_total_simtime}; "
+                "maximum efficiency for given runtime constant not achieved. "
+                "Allocating simulation time to achieve maximum efficiency..."
+            )
+
+            # === HARD BARRIER: wait for all SOMD jobs for THIS STAGE to finish ===
+            if _GLOBAL_SOMD_MANAGER:
+                _GLOBAL_SOMD_MANAGER.wait_for_stage(leg, stg)
+            else:
+                # Fallback to original waiting if no manager is present
+                while self.running_wins:
+                    _sleep(cycle_pause)
+                    if self.kill_thread:
+                        self._logger.info("Kill thread requested: exiting run loop")
+                        return
+                    self.virtual_queue.update()
+                    for win in list(self.running_wins):
+                        if not win.running:
+                            self.running_wins.remove(win)
+                        win._update_log()
+                        self._dump()
+
+            # Now that everything for this stage is complete, it is safe to analyse
+            gradient_data = _GradientData(lam_winds=self.lam_windows, equilibrated=False)
+            smooth_dg_sems = gradient_data.get_time_normalised_sems(
+                origin="inter_delta_g", smoothen=True
+            )
+
+            any_resubmitted = False
+            for i, win in enumerate(self.lam_windows):
+                normalised_sem_dg = smooth_dg_sems[i]
+                predicted = (1 / _np.sqrt(self.runtime_constant * self.relative_simulation_cost)) * normalised_sem_dg
+                actual = win.get_tot_simtime(run_nos=run_nos)
+
+                win._logger.info(f"Predicted maximum efficiency run time for is {predicted:.3f} ns")
+                win._logger.info(f"Actual run time is {actual} ns")
+
+                # Cap per-window runtime
+                if predicted > max_runtime * win.ensemble_size:
+                    win._logger.info(
+                        f"Predicted maximum efficiency run time per window is "
+                        f"{predicted / win.ensemble_size}, which exceeds the maximum runtime of "
+                        f"{max_runtime} ns. Running to the maximum runtime instead."
+                    )
+                    predicted = max_runtime * win.ensemble_size
+
+                if actual < predicted:
+                    resubmit_time = (predicted - actual) / win.ensemble_size
+                    # conservative cap like upstream to avoid overshoot early on
+                    resubmit_time = min(resubmit_time, actual / win.ensemble_size if actual > 0 else resubmit_time)
+                    # round up to nearest 0.1 ns (keep upstream behavior)
+                    resubmit_time = _math.ceil(resubmit_time * 10) / 10.0
+
+                    if resubmit_time > 0:
+                        any_resubmitted = True
+                        win._logger.info(
+                            f"Window has not reached maximum efficiency. Resubmitting for {resubmit_time:.3f} ns"
+                        )
+                        win.run(run_nos=run_nos, runtime=resubmit_time)
+                        # We DON'T touch self.running_wins here; the manager barrier handles waiting.
+                else:
+                    win._logger.info(
+                        f"Window has reached the most efficient run time at {actual}. No further simulation required"
+                    )
+
+            if not any_resubmitted:
+                self._maximally_efficient = True
+                self._logger.info(
+                    "Maximum efficiency for given runtime constant of "
+                    f"{self.runtime_constant} kcal**2 mol**-2 ns**-1 achieved"
+                )
+
+        # One last barrier (paranoia) to ensure no stragglers before returning
+        if _GLOBAL_SOMD_MANAGER:
+            _GLOBAL_SOMD_MANAGER.wait_for_stage(leg, stg)
+
+    Stage._run_loop_adaptive_efficiency = _run_loop_adaptive_efficiency_barrier
 
 
 def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
@@ -1445,6 +1525,7 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
     )
     logger.info(f"Concurrent SOMD max workers: {_GLOBAL_SOMD_MANAGER.max_workers}")
 
+    patch_stage_adaptive_efficiency_with_barrier()
 
     # Silence subprocess calls (for ln commands and other system calls)
     original_call = subprocess.call
