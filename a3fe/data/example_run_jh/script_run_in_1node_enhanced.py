@@ -2196,6 +2196,7 @@ if __name__ == "__main__":
     FORCE_LOCAL_EXECUTION = True
     FORCE_CPU_PLATFORM = False
     MAX_CONCURRENT_SOMD=5  # It seems we should set this to 5 in HPC
+    A3FE_STILL_RUNNING_THROTTLE_SEC=600
 
     patch_virtual_queue_for_local_execution()
     patch_logging_into_local_execution_log()
