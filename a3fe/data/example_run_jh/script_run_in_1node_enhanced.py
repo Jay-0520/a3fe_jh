@@ -44,6 +44,8 @@ from collections import defaultdict
 from decimal import Decimal
 from a3fe.run.fix_simulation_times import fix_simulation_times
 import inspect
+import BioSimSpace as BSS
+import BioSimSpace.Sandpit.Exscientia as _BSS
 
 
 # Configuration options
@@ -1848,6 +1850,22 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
     logger.info("A3FE._virtual_queue was successfully patched for local execution")
 
 
+
+def install_force_constant_default(k_kcal_per_mol_per_A2: float = 20.0):
+    orig = _BSS.FreeEnergy.RestraintSearch.analyse
+    k = (k_kcal_per_mol_per_A2 *
+         BSS.Units.Energy.kilocalorie_per_mole /
+         (BSS.Units.Length.angstrom ** 2))
+    def _wrapped(*args, **kwargs):
+        if kwargs.get("force_constant") is None:
+            kwargs["force_constant"] = k
+        return orig(*args, **kwargs)
+    _BSS.FreeEnergy.RestraintSearch.analyse = _wrapped
+    print(f"[PATCH] Default restraint force_constant set to {k_kcal_per_mol_per_A2} kcal/mol/Å^2")
+
+
+
+
 def patch_logging_into_local_execution_log():
     """
     Simply move loggings like:
@@ -2198,6 +2216,7 @@ if __name__ == "__main__":
     MAX_CONCURRENT_SOMD=5  # It seems we should set this to 5 in HPC
     A3FE_STILL_RUNNING_THROTTLE_SEC=600
 
+    # Install_force_constant_default(20.0)   # set default force constant to 20 to fix restraint extraction error 
     patch_virtual_queue_for_local_execution()
     patch_logging_into_local_execution_log()
 

@@ -40,7 +40,7 @@ def _maybe_load_append_sel(paths):
     return None
 
 
-def check_repeat(repeat_dir):
+def check_repeat(repeat_dir, force_constant=20.0):
     """Return (status, msg) for one repeat dir."""
     temp_k = 298.15
     prm = os.path.join(repeat_dir, "bound_preequil.prm7")
@@ -66,6 +66,7 @@ def check_repeat(repeat_dir):
             work_dir=repeat_dir,  # scratch here is fine
             temperature=temp_k * _BSS.Units.Temperature.kelvin,
             append_to_ligand_selection="",
+            force_constant=(force_constant * _BSS.Units.Energy.kcal_per_mol / (_BSS.Units.Length.angstrom ** 2)),
         )
         if restraint is None:
             return ("FAIL", "analyse() returned None (no stable restraint found)")
@@ -80,6 +81,8 @@ def main():
                     help="Path to the bound directory that contains ensemble_equilibration_1..5/")
     ap.add_argument("--start", type=int, default=1)
     ap.add_argument("--end", type=int, default=5)
+    ap.add_argument("--force_constant", type=float, default=10.0,
+                    help="Force constant (k) to use in analyse(), default 10.0 kcal/(mol*Å²)")
     args = ap.parse_args()
 
     bound_dir = os.path.abspath(args.bound_dir)
@@ -94,7 +97,7 @@ def main():
     results = []
     for i in range(args.start, args.end + 1):
         rep_dir = os.path.join(bound_dir, f"ensemble_equilibration_{i}")
-        status, msg = check_repeat(rep_dir)
+        status, msg = check_repeat(repeat_dir=rep_dir, force_constant=args.force_constant)
         print(f"[{i}] {status:<5} - {msg}")
         results.append((i, status, msg))
 
