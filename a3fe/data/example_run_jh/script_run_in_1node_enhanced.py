@@ -5,7 +5,9 @@ This script is enhanced such ways:
     - concurrent SOMD execution
     - robust error handling and logging for MBAR and SOMD jobs
 
-It has been tested on macOS and HPC with Python 3.10+ as of 2025-08-31 
+It has been tested on macOS and HPC with Python 3.10+ as of 2025-10-03
+
+todo: MBAR logging can be improved further
 """
 import os
 import threading
@@ -44,6 +46,8 @@ from collections import defaultdict
 from decimal import Decimal
 from a3fe.run.fix_simulation_times import fix_simulation_times
 import inspect
+import BioSimSpace as BSS
+import BioSimSpace.Sandpit.Exscientia as _BSS
 
 
 # Configuration options
@@ -1074,7 +1078,7 @@ def _install_mbar_barrier_wrapper(logger):
             # IMPORTANT NOTE: Give file system time to sync
             # It takes a few seconds for the file system to sync after MBAR jobs complete
             # otherwise create dummy MBAR output files even if the jobs are done and outputs will be there
-            time.sleep(2)
+            time.sleep(10)
 
         kwargs_modified = kwargs.copy()
         kwargs_modified["delete_outfiles"] = False
@@ -1083,7 +1087,7 @@ def _install_mbar_barrier_wrapper(logger):
         if _GLOBAL_MBAR_MANAGER:
             # IMPORTANT NOTE: same reason for the sleep(2) above, we need to wait a bit
             max_retries = 3
-            retry_delay = 1.0
+            retry_delay = 5.0
             missing = []
             for ofile in list(_GLOBAL_MBAR_MANAGER.expected_outputs):
                 file_found = False
@@ -1106,7 +1110,7 @@ def _install_mbar_barrier_wrapper(logger):
                             )
 
                         time.sleep(retry_delay)
-                        retry_delay *= 1.5
+                        retry_delay *= 2.0
 
                 if not file_found:
                     missing.append(ofile)
@@ -1848,6 +1852,22 @@ def patch_virtual_queue_for_local_execution(use_faster_wait: bool = False):
     logger.info("A3FE._virtual_queue was successfully patched for local execution")
 
 
+
+def install_force_constant_default(k_kcal_per_mol_per_A2: float = 20.0):
+    orig = _BSS.FreeEnergy.RestraintSearch.analyse
+    k = (k_kcal_per_mol_per_A2 *
+         BSS.Units.Energy.kilocalorie_per_mole /
+         (BSS.Units.Length.angstrom ** 2))
+    def _wrapped(*args, **kwargs):
+        if kwargs.get("force_constant") is None:
+            kwargs["force_constant"] = k
+        return orig(*args, **kwargs)
+    _BSS.FreeEnergy.RestraintSearch.analyse = _wrapped
+    print(f"[PATCH] Default restraint force_constant set to {k_kcal_per_mol_per_A2} kcal/mol/Å^2")
+
+
+
+
 def patch_logging_into_local_execution_log():
     """
     Simply move loggings like:
@@ -2198,18 +2218,18 @@ if __name__ == "__main__":
     MAX_CONCURRENT_SOMD=5  # It seems we should set this to 5 in HPC
     A3FE_STILL_RUNNING_THROTTLE_SEC=600
 
+    # Install_force_constant_default(20.0)   # set default force constant to 20 to fix restraint extraction error 
     patch_virtual_queue_for_local_execution()
     patch_logging_into_local_execution_log()
 
     # _debug_patch_stage_skip_adaptive_efficiency()
     # _debug_patch_force_not_equilibrated()
-    a3.Calculation.required_legs = [_LegType.BOUND]
+    # a3.Calculation.required_legs = [_LegType.BOUND]
     sysprep_cfg = SystemPreparationConfig(slurm=True)  # use default settings
 
     calc = a3.Calculation(
         base_dir="/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_again2",
         input_dir="/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_again2/input",
-        ensemble_size=3,
     )
 
     calc.setup(
@@ -2221,7 +2241,7 @@ if __name__ == "__main__":
 
     calc.get_optimal_lam_vals()
     calc.run(adaptive=True,
-             parallel=False)              # run things sequentially
+             parallel=True)
 
     calc.wait()
     calc.analyse()
