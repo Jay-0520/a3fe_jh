@@ -5,7 +5,9 @@ This script is enhanced such ways:
     - concurrent SOMD execution
     - robust error handling and logging for MBAR and SOMD jobs
 
-It has been tested on macOS and HPC with Python 3.10+ as of 2025-08-31 
+It has been tested on macOS and HPC with Python 3.10+ as of 2025-10-03
+
+todo: MBAR logging can be improved further
 """
 import os
 import threading
@@ -1076,7 +1078,7 @@ def _install_mbar_barrier_wrapper(logger):
             # IMPORTANT NOTE: Give file system time to sync
             # It takes a few seconds for the file system to sync after MBAR jobs complete
             # otherwise create dummy MBAR output files even if the jobs are done and outputs will be there
-            time.sleep(2)
+            time.sleep(10)
 
         kwargs_modified = kwargs.copy()
         kwargs_modified["delete_outfiles"] = False
@@ -1085,7 +1087,7 @@ def _install_mbar_barrier_wrapper(logger):
         if _GLOBAL_MBAR_MANAGER:
             # IMPORTANT NOTE: same reason for the sleep(2) above, we need to wait a bit
             max_retries = 3
-            retry_delay = 1.0
+            retry_delay = 5.0
             missing = []
             for ofile in list(_GLOBAL_MBAR_MANAGER.expected_outputs):
                 file_found = False
@@ -1108,7 +1110,7 @@ def _install_mbar_barrier_wrapper(logger):
                             )
 
                         time.sleep(retry_delay)
-                        retry_delay *= 1.5
+                        retry_delay *= 2.0
 
                 if not file_found:
                     missing.append(ofile)
@@ -2222,13 +2224,12 @@ if __name__ == "__main__":
 
     # _debug_patch_stage_skip_adaptive_efficiency()
     # _debug_patch_force_not_equilibrated()
-    a3.Calculation.required_legs = [_LegType.BOUND]
+    # a3.Calculation.required_legs = [_LegType.BOUND]
     sysprep_cfg = SystemPreparationConfig(slurm=True)  # use default settings
 
     calc = a3.Calculation(
         base_dir="/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_again2",
         input_dir="/Users/jingjinghuang/Documents/fep_workflow/test_somd_run_again2/input",
-        ensemble_size=3,
     )
 
     calc.setup(
@@ -2240,7 +2241,7 @@ if __name__ == "__main__":
 
     calc.get_optimal_lam_vals()
     calc.run(adaptive=True,
-             parallel=False)              # run things sequentially
+             parallel=True)
 
     calc.wait()
     calc.analyse()
