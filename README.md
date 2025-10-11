@@ -70,7 +70,7 @@ python -m pip install --no-deps .
 
 
 ### Running a3fe in one node
-- It is highly recommended to use script `a3fe_jh/a3fe/data/example_run_jh/script_run_in_1node_enhanced.py` to run a3fe calculation in one node, especially in a HPC environment, since queueing can be very slow. 
+- It is highly recommended to use script `a3fe_jh/a3fe/data/example_run_jh/script_run_in_1node_enhanced.py` ([link](https://github.com/Jay-0520/a3fe_jh/blob/main/a3fe/data/example_run_jh/script_run_in_1node_enhanced.py)) to run a3fe calculation in one node, especially in a HPC environment, since queueing can be very slow. 
   - for running in adaptive mode, make sure to remove this step `calc.set_equilibration_time()`
 
 
@@ -169,7 +169,9 @@ calc.save()
   - secondly, we can apply `patch_shorter_runtime_when_resuming(new_runtime=0.1)` from `script_run_in_1node_enhanced.py` avoid running additional simulations for lambdaw windows that were already completed:
     ```
         calc = a3.Calculation(base_dir="previous_one", input_dir="previous_one")
-        patch_shorter_runtime_when_resuming(0)  # this patch can be useful to speed up the process
+        # this patch can be useful to speed up the process
+        # 0.1 is the minimum in a3fe 
+        patch_shorter_runtime_when_resuming(0.1) 
         calc.run(adaptive=True,
                 parallel=True)
         calc.wait()
