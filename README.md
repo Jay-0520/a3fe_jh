@@ -159,6 +159,7 @@ calc.save()
     ╰──────────────────────────────────────────────────────────────────────────────╯
     ParameterisationError: Parameterisation failed! Last error: 'Unable to create 
     OpenFF Interchange object!'
+    See this [issue](https://github.com/openforcefield/openff-interchange/issues/1309) for more details 
     ```    
 
 ### How to resume previously-killed run? 
