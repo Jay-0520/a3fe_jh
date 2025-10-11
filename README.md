@@ -159,8 +159,8 @@ calc.save()
     ╰──────────────────────────────────────────────────────────────────────────────╯
     ParameterisationError: Parameterisation failed! Last error: 'Unable to create 
     OpenFF Interchange object!'
-    See this [issue](https://github.com/openforcefield/openff-interchange/issues/1309) for more details 
     ```    
+    See this [issue](https://github.com/openforcefield/openff-interchange/issues/1309) for more details 
 
 ### How to resume previously-killed run? 
 - we often need to resume calculation to extend simulations due to the sampling challenge of FEP. we can use this tool `a3fe.run.fix_simulation_times.py` to check simulations runs that were interrupted. we must ensure all runs for a given lambda have completed the same amount of runtime.
